@@ -91,7 +91,7 @@ All commercial entry points are Azure entry points, since it's first party.
 ### Course vs docs
 
 - No conflicts found with the DP-750 notes or current docs. The course matches them on: Standard tier gone for new workspaces, Free Edition replacing Community Edition, and serverless compute in the Databricks-managed subscription.
-- Typo on the course page: the "Databricks Order with an Azure Commit" card says *"only ADI Services bill directly"*. It's not clear what "ADI" means. Ask the account team or check before relying on it.
+- The "Databricks Order with an Azure Commit" card says *"only ADI Services bill directly"*. This isn't a typo: lesson 1.4 links "ADI Services" to [docs.databricks.com/adi](https://docs.databricks.com/adi) and says it's an integration setting for eligible accounts, covered in lesson 2.5. Fill in the details then.
 
 ### Official references (from the lesson, checked 2026-10-27)
 
@@ -383,4 +383,121 @@ output workspaceId string = workspace.properties.workspaceId
 
 ---
 
-<!-- Next: 1.4 Account Administration on Azure -->
+## 1.4 Account Administration on Azure
+
+Lecture, 12 min. Theme: *the tenant-bound account, and a bill that lives in Azure.*
+
+Objectives: bootstrap and operate the Azure Databricks account; find billing in Azure, not in the account console.
+
+### A. Account bootstrap by a Global Administrator ⚠️
+
+**Bootstrap flow:**
+1. A **Microsoft Entra ID Global Administrator** signs in to **`accounts.azuredatabricks.net`** with Entra.
+2. The **first account admin role is created automatically** for them.
+3. They **delegate**: User management → user → Roles tab → **Account admin**.
+4. **Remove the Global Admin from the Databricks account.**
+
+**Details:**
+- **Tenant binding:** the Databricks account is tied to the **Microsoft Entra tenant ID**. **Workspaces can't move to another tenant.** If you move the Azure resource, it stays in the original account. If you belong to several tenants, the console opens in your **default tenant**.
+- **First admin:** **only an Entra Global Administrator** can establish the first account admin, just by signing in to the account console. **Additional account admins need no Entra role at all.**
+- **Workspace admins:** anyone with **Azure Contributor or Owner** (at subscription level, or the documented custom role) becomes a **workspace admin on first login**, and keeps it even if the Azure role is removed later. The creator is added automatically.
+- **Identity defaults:** **identity federation is on for every new workspace and can't be turned off.** **Automatic identity management** is on for accounts created after **August 1, 2025** (Section 2).
+
+> Exam angles:
+> - "Who can set up the first account admin?" → only an Entra **Global Administrator**. After that, account admins need no Entra role.
+> - "Least privilege after bootstrap" → delegate account admin, then remove the Global Admin from the Databricks account.
+> - "Move a workspace to a different Entra tenant" → not possible.
+
+### B. The account console
+
+Account console = `accounts.azuredatabricks.net` (one per Entra tenant; the account ID is under the username menu).
+
+| Area | What's there |
+|---|---|
+| **Workspaces** | Every workspace in the tenant with its tier and region. **Update workspace** attaches an **NCC**. The **Network policy** section assigns an egress policy. The **Add-ons** tab enables Mission Critical. |
+| **User management** | Users, groups, and service principals at account level. The **Roles** tab grants account admin. Choose **Databricks-managed vs Entra-managed** service principals. |
+| **Catalog** | **Metastores per region**: create, assign to workspaces, set the metastore admin, manage configuration |
+| **Usage** | Importable usage dashboards (by product, SKU, and custom tag), reading from **`system.billing.usage`** and **`list_prices`**. **Budgets** tab with up to **four email thresholds per budget**. The older DBU usage report **leaves out serverless usage**. **No invoices**: those are in Azure. |
+| **Security** | Identity provider setup (the **automatic identity management** toggle, account-wide **federation policies**), Token report, and **Networking**: NCCs plus context-based ingress and egress control policies |
+| **Settings, Previews, Resilience** | Feature enablement (the **serverless toggle**, partner-powered AI features with an **Enforce** option, and the separate **ADI Services** integration setting for eligible accounts, see 2.5), account nickname, **preview features**, and **Managed DR** failover groups and stable URLs |
+
+**Billing lives in Azure** ⚠️
+- **There's no subscription or billing section in the Azure account console.**
+- Usage and Budgets show **DBUs at list price** and **ignore credits and negotiated discounts**.
+- Invoiced cost, reservations, and pre-purchase (DBCU) drawdown are in **Azure Cost Management + Billing**. Lesson 1.6 reconciles them against system tables.
+
+> Exam trap: "Finance wants the actual invoiced Databricks cost with discounts" → **Azure Cost Management + Billing**, not the account console's Usage page (list price only).
+
+### C. Platform limits ⚠️
+
+| Object | Limit | Scope |
+|---|---|---|
+| **Network connectivity configurations (NCCs)** | **20 per region** | Account |
+| **Private endpoints** (NCC private endpoint rules) | **100 per region, across all NCCs** | Account |
+| **Workspaces per NCC** | **50** | Account |
+| IP access list entries | **1,000** IP or CIDR values for the account console; 1,000 per workspace | Account and workspace |
+| Users and service principals | 10,000 per account and per workspace | Account and workspace |
+| Groups | 5,000 per account; 1,500 direct memberships; 10 nesting levels | Account |
+| **Metastores** | **One per region** | Account |
+| Managed DR | 100 failover groups per account; 1 per workspace; 10 catalogs each | Account |
+| Budgets | 1,000 per account | Account |
+| Secret scopes, SQL warehouses, saved jobs | 1,000 scopes, 1,000 warehouses, 12,000 jobs per workspace | Workspace |
+
+**No published workspace-count limit.** Databricks doesn't publish a fixed number of workspaces per account on Azure. In practice, what limits sprawl is **Azure quotas** and the **per-region NCC and private endpoint caps**.
+
+### D. Where Azure quotas intersect
+
+| Compute | Storage and networking | Design consequence |
+|---|---|---|
+| **vCPU quota per VM family per region** limits cluster size and count. Request increases before go-live. | **250 storage accounts per region per subscription** by default (1,000 on request) | **One subscription per environment** keeps Azure quotas, RBAC, and Azure Policy aligned with the workspace boundary |
+| Around **25,000 VMs per subscription per region** | **980 resource groups per subscription.** Each classic workspace creates a managed RG, while its parent RG can be reused. | **Private endpoint and NCC caps are per Databricks account region, not per subscription.** Adding subscriptions doesn't raise them. |
+| The 800-resources-per-type resource group limit has exceptions: VMs, managed disks, and NICs are exempt. Their service and subscription quotas still apply. | Public IPs, NAT gateways, VNets, and private endpoints have their own per-subscription networking limits. Check the Azure subscription limits page when planning hub-and-spoke. | **Serverless workspaces avoid most compute and networking quotas entirely** |
+
+> Exam angles:
+> - "Need a 21st NCC in East US" or "more than 100 private endpoints in a region" → the account-level cap. More subscriptions won't help.
+> - "Second metastore in the same region" → not allowed. One metastore per region; share it across workspaces.
+> - "How many workspaces can an account have?" → no published limit. Azure quotas and NCC caps limit it in practice.
+
+### Key takeaways
+
+- One Databricks account per Entra tenant. An Entra Global Administrator creates the first account admin by signing in to `accounts.azuredatabricks.net`.
+- Azure Contributor or Owner on the workspace resource makes you workspace admin on first login.
+- The account console governs workspaces, identities, metastores, usage and budgets, security, and resilience. Invoices are in Azure Cost Management.
+- Limits to remember: 20 NCCs and 100 private endpoints per region, 50 workspaces per NCC, 1,000 IP access list values, one metastore per region.
+- Azure quotas (vCPU, storage accounts, resource groups, networking) shape estate design. One subscription per environment keeps them aligned.
+
+### Course vs docs
+
+- No conflicts with DP-750 or earlier lessons. This lesson matches 1.1 (one account per Entra tenant, no separate Databricks bill) and 1.3 (the creator stays workspace admin).
+- The "ADI Services" phrase from 1.1 turns out to be a real setting (see the note under 1.1).
+- Limits change often. Recheck [Resource limits](https://learn.microsoft.com/en-us/azure/databricks/resources/limits) before quoting a number to a customer.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Admin concepts](https://learn.microsoft.com/en-us/azure/databricks/admin/admin-concepts)
+- [Account settings](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/)
+- [Resource limits](https://learn.microsoft.com/en-us/azure/databricks/resources/limits)
+- [Managed disaster recovery](https://learn.microsoft.com/en-us/azure/databricks/admin/managed-disaster-recovery)
+- [Budgets](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/budgets)
+- [Azure subscription and service limits](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits)
+- [Resources not limited to 800 per resource group](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resources-without-resource-group-limit)
+- [ADI](https://docs.databricks.com/adi)
+- [Genie Code CLI](https://learn.microsoft.com/en-us/azure/databricks/genie-code/genie-code-cli)
+- [Serverless Private Link](https://learn.microsoft.com/en-us/azure/databricks/security/network/serverless-network-security/serverless-private-link)
+- [Create a workspace](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace/create-workspace)
+
+### ⚡ Quick review
+
+- [ ] Who can create the first account admin? Do later account admins need an Entra role?
+- [ ] What are the 4 bootstrap steps, and what's the last one?
+- [ ] Can a workspace move to another Entra tenant?
+- [ ] Which Azure role makes someone a workspace admin automatically?
+- [ ] Where do you see invoiced cost with discounts and DBCU drawdown? What does the Usage page show instead?
+- [ ] Which usage report leaves out serverless?
+- [ ] NCCs per region, private endpoints per region, workspaces per NCC, metastores per region?
+- [ ] Why doesn't adding Azure subscriptions raise the NCC or private endpoint caps?
+- [ ] Why does one subscription per environment help?
+
+---
+
+<!-- Next: 1.5 Unity Catalog Setup on Azure -->
