@@ -33,3 +33,20 @@ Score: **5/6**
 ### Weak spots
 
 - **Workspace ID vs account ID: missed twice (1.1 Q4, 1.2 Q6).** Both times the answer picked the number from the workspace URL. The URL number is always the **workspace ID**. The **account ID** is a GUID, never appears in any workspace URL, and is found only in the **account console** (`accounts.azuredatabricks.net`) under the username menu. Keep re-testing until it sticks.
+
+## 1.3 Deploying Workspaces (2026-11-21)
+
+Score: **6/6**
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Failed workspace → delete and redeploy | C | C | ✓ |
+| 2 | Serverless from Terraform → `azapi` or Bicep (azurerm lacks `computeMode`) | B | B | ✓ |
+| 3 | Fixed for life: double encryption, injected subnet CIDRs (TWO) | AD | AD | ✓ |
+| 4 | New subscription → register resource providers | A | A | ✓ |
+| 5 | Managed VNet → VNet injection: preview, clusters stopped, back-end PL rebuilt, no way back | D | D | ✓ |
+| 6 | Re-test #3: account-level Terraform `account_id` = GUID from account console | C | C | ✓ |
+
+### Weak spots
+
+- **Workspace ID vs account ID: fixed on the 3rd try (1.3 Q6).** Re-test once more in a later section to confirm it has stuck.
