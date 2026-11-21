@@ -500,4 +500,126 @@ Account console = `accounts.azuredatabricks.net` (one per Entra tenant; the acco
 
 ---
 
-<!-- Next: 1.5 Unity Catalog Setup on Azure -->
+## 1.5 Unity Catalog Setup on Azure
+
+Lecture, 12 min. Theme: *metastore, access connector, and the abfss path.*
+
+Objectives: create metastores and access connectors; wire storage credentials and external locations on ADLS Gen2.
+
+UC basics (three-level namespace, managed vs external tables, GRANTs, Purview) are in [DP-750 LP1-M1 §6](../../dp-750/notes/LP1-M1-explore-azure-databricks.md#6-governance-unity-catalog-and-microsoft-purview). This lesson is about the Azure plumbing: how UC reaches your storage.
+
+### A. The regional metastore ⚠️
+
+- **Automatic UC enablement** for new workspaces began rolling out on **November 9, 2023**. Verify the metastore assignment of the actual workspace rather than assuming.
+- Automatic enablement creates the regional metastore **without metastore-level managed storage** ("no root storage by design"). Each workspace gets a **workspace catalog** whose managed location is the **workspace storage account** (`dbstorage`).
+- **One metastore per region.** Attach every workspace in that region to it.
+
+**How the pieces chain together** (lesson example):
+
+```
+Metastore (australiaeast) ── no root storage
+├── Workspace catalog ── managed location in the dbstorage account
+└── Catalog: lakeside_claims ── managed location abfss://claims@lakesidelake.dfs.core.windows.net/managed
+        └── External location: claims_landing ── abfss://landing@lakesidelake.dfs.core.windows.net/
+              └── Storage credential ── Azure managed identity via the access connector
+                    └── Access Connector for Azure Databricks (Microsoft.Databricks/accessConnectors)
+                          └── [Storage Blob Data Contributor] → lakesidelake (ADLS Gen2, hierarchical namespace)
+```
+
+**Details:**
+- **The metastore admin is optional** on auto-enabled metastores. **Workspace admins** receive CREATE CATALOG, CREATE EXTERNAL LOCATION, CREATE STORAGE CREDENTIAL, CREATE SERVICE CREDENTIAL, CREATE CONNECTION, and related privileges **through a system group**.
+- **Manual creation** (account console → Catalog → Create metastore) asks for a name, region, an **optional** ADLS Gen2 path (the `abfss://` prefix is added for you), and an **optional** access connector ID.
+- ⚠️ **Assignment is one-way: enabling a workspace for UC can't be reversed.** Attach it through the metastore's **Workspaces** tab or with `databricks account metastore-assignments create`.
+- **Design guidance:** assign **managed storage at catalog level** for isolation. Leave the metastore **without root storage**, so a forgotten location fails fast instead of landing data in a shared account.
+
+### B. The access connector ⚠️
+
+The **Access Connector for Azure Databricks** is a first-party Azure resource that **wraps a managed identity**, so UC can reach your storage **without secrets**. It can carry a **system-assigned** identity, one or more **user-assigned** identities, or both. **Put it in the same region as the storage account.**
+
+| Step | Who | What |
+|---|---|---|
+| 1. Create the connector | **Contributor or Owner on the resource group** | `Microsoft.Databricks/accessConnectors` with `identity.type = SystemAssigned` (or attach a user-assigned identity) |
+| 2. Grant storage access | **Owner or User Access Administrator on the storage account** | **Storage Blob Data Contributor** on the account, **or** Storage Blob Delegator on the account plus Storage Blob Data Contributor on a container |
+| 3. Grant file-event access | Same | **Storage Queue Data Contributor**, **Storage Account Contributor** (so Databricks can create the queue), and **EventGrid Data Contributor** on the resource group |
+| 4. Create the storage credential | **CREATE STORAGE CREDENTIAL** on the metastore | Credential type **Azure Managed Identity**, with the connector's **resource ID** (and, for user-assigned, the identity's resource ID) |
+| 5. Create external locations | **CREATE EXTERNAL LOCATION** on the metastore **and** the credential | `CREATE EXTERNAL LOCATION name URL 'abfss://container@account.dfs.core.windows.net/path' WITH (STORAGE CREDENTIAL cred)` |
+
+**Why managed identities and not service principals:**
+- No secrets to store or rotate.
+- **Only a managed identity can be admitted through a storage firewall** as a trusted service or resource instance.
+- **Service principal storage credentials are documented as legacy.** Section 2 covers user-assigned identity patterns and firewall traversal in depth.
+
+> Exam angles:
+> - "Who assigns Storage Blob Data Contributor to the connector?" → someone with **Owner or User Access Administrator** on the storage account. Contributor isn't enough to assign roles.
+> - "Storage account has a firewall; UC access fails with a service principal credential" → switch to an **access connector (managed identity)**. Only that can pass the firewall as a trusted resource instance.
+> - "Auto Loader file-notification mode can't create its queue" → missing **Storage Queue Data Contributor / Storage Account Contributor / EventGrid Data Contributor**.
+
+### C. External locations, overlap, and CORS
+
+**Path rules**
+- **ADLS Gen2 with the hierarchical namespace.** Azure Blob Storage (no HNS) isn't supported. **OneLake external locations are in Beta** (ID-based abfss paths, Databricks Runtime 18.1 or above, or serverless).
+- Paths use standard ASCII. **Immutable (WORM) containers are rejected.**
+- **Catalog and schema managed locations must sit inside an external location.** Managed locations can't overlap external tables or volumes, and **external locations can't overlap each other**.
+
+**CORS for volume uploads**
+- **Uploading files to managed volumes from the UI needs a CORS rule** on the storage account's **Blob** service.
+- Allowed origins `https://*.azuredatabricks.net`, allowed methods `PUT`, allowed headers `x-ms-blob-type`, exposed headers blank, max age `1800`.
+- Set it in the portal under **Settings → Resource sharing (CORS)**.
+
+**File events**
+- **On by default for new external locations.** They power Auto Loader and file-arrival triggers without per-pipeline wiring.
+- **Automatic** mode creates the queue and Event Grid subscription for you. **Provided** mode brings your own.
+- **Premium storage accounts can't use automatic mode** (queues need Standard).
+
+### D. Default storage or your own ADLS
+
+| Choose | When |
+|---|---|
+| **Default storage** (serverless workspaces) | Serverless-only estate, teams without Azure infrastructure rights, fastest start. BI over ODBC/JDBC and the Files API still work. |
+| **Customer-managed ADLS Gen2** via access connector | **Classic compute must read the data**, external engines need file-level or credential-vended access, or you need your own **CMK, firewall, private endpoints**, or other tools that write to the lake |
+| **Both** | Workspace catalog and scratch work on default storage; governed domain catalogs with managed locations on your storage accounts |
+
+(Ties back to 1.2: classic compute can't read default storage.)
+
+### Key takeaways
+
+- One metastore per region. Automatic enablement rollout began November 9, 2023, and creates the metastore without root storage. The workspace catalog lives in the workspace storage account.
+- The access connector wraps a system- or user-assigned managed identity. Grant Storage Blob Data Contributor, plus the Queue, Storage Account, and EventGrid roles for file events.
+- Storage credential (Azure Managed Identity, connector resource ID), then external locations on `abfss://` paths. Locations can't overlap.
+- A CORS rule on the Blob service (origin `https://*.azuredatabricks.net`, PUT, `x-ms-blob-type`, max age 1800) enables UI uploads to managed volumes.
+- Default storage for serverless quick starts. Customer ADLS Gen2 when classic compute, external engines, or your own network and key controls are involved.
+
+### Course vs docs
+
+- **Wording difference with DP-750:** DP-750 says metastores are "**typically** one per region". This course (and lesson 1.4's limits table) says **one per region** as a hard limit. For the exam, treat it as a limit: one metastore per region per account.
+- Both agree that automatic UC enablement started for workspaces created after November 9, 2023.
+- OneLake external locations are Beta. Expect this to change.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Create a metastore](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/create-metastore)
+- [Azure managed identities for UC](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities)
+- [External locations on ADLS](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls)
+- [Manage external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/manage-external-locations)
+- [Storage CORS](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/storage-cors)
+- [Default storage](https://learn.microsoft.com/en-us/azure/databricks/storage/default-storage)
+- [Standard tier](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/standard-tier)
+- [Enable workspaces for UC](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/enable-workspaces)
+- [OneLake external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-onelake)
+
+### ⚡ Quick review
+
+- [ ] What does automatic UC enablement create, and what does it leave out?
+- [ ] Who gets CREATE CATALOG etc. on an auto-enabled metastore if there's no metastore admin?
+- [ ] Can you un-assign a workspace from UC?
+- [ ] Why leave the metastore without root storage?
+- [ ] Put the 5 access connector steps in order, with who does each one.
+- [ ] Which 3 extra roles do file events need? Which storage tier can't use automatic mode?
+- [ ] Why managed identity over service principal for storage credentials?
+- [ ] What are the CORS settings for volume uploads (origin, method, header, max age)?
+- [ ] Which storage types are rejected for external locations?
+- [ ] When must you use your own ADLS instead of default storage?
+
+---
+
+<!-- Next: 1.6 Operating Azure Databricks Estates -->
