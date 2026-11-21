@@ -57,7 +57,7 @@ Read from the course syllabus on 2026-11-21. Lessons are SCORM modules unless ma
 ## Progress
 
 - [ ] Intro
-- [ ] S1 Workspace Administration Fundamentals
+- [ ] S1 Workspace Administration Fundamentals (1.1 Service Architecture notes done)
 - [ ] S2 Cloud Integrations
 - [ ] S3 Networking and Security Fundamentals
 - [ ] Summary and course quiz (earns the badge)
