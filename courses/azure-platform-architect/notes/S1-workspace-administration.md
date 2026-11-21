@@ -118,4 +118,128 @@ All commercial entry points are Azure entry points, since it's first party.
 
 ---
 
-<!-- Next: 1.2 Workspace Types and Tiers -->
+## 1.2 Workspace Types and Tiers
+
+Lecture, 10 min. Theme: *Serverless or Hybrid, and Premium either way.*
+
+Objectives: choose between classic and serverless workspace types; treat Premium as the only tier going forward.
+
+Two decisions frame every deployment: the **workspace type** (chosen once at creation) and the **pricing tier** (no longer a real choice).
+
+### A. Workspace types ⚠️
+
+- Portal **Workspace type** selector: **Serverless** or **Hybrid** (classic).
+- In ARM it's **`computeMode`**: **required at creation and never changeable**.
+- A serverless workspace comes preconfigured with serverless compute and **default storage**. It needs **no VNet, no storage account, and no managed resource group** in your subscription.
+
+**Decision flow** (any "yes" → Classic/Hybrid, with VNet injection recommended):
+
+1. **Need compute inside your own VNet?** Traffic inspection, ExpressRoute, back-end Private Link.
+2. **Classic-only workload?** RDD code, **Scala or R** as the main language, time-based streaming triggers, Lakeflow Connect to on-premises or private databases.
+3. **Region or preview gap?** Check the feature-region table for serverless workspaces.
+4. All "no" → **Serverless workspace**: quick start, no cloud wiring.
+
+**Currency check:** serverless workspaces went **GA on Azure on January 30, 2026**. They're in most commercial regions that have serverless compute (Australia East, East US 2, West Europe, UK South, and more). **Four regions have serverless compute but no serverless workspaces: Canada East, China North 3, Jio India West, UK West.** Check the region table before promising one to a customer.
+
+### B. What isn't created for a serverless workspace ⚠️
+
+| Workspace property (ARM) | Classic (Hybrid) | Serverless |
+|---|---|---|
+| `managedResourceGroupId` | **Required** | Not allowed |
+| `parameters` (VNet injection, subnets, NAT gateway, storage account, `enableNoPublicIp`) | Available | Not allowed |
+| `accessConnector`, `defaultStorageFirewall`, `defaultCatalog`, `requiredNsgRules` | Available | Not allowed |
+| `encryption.entities.managedDisk`, infrastructure (double) encryption | Available | Not allowed |
+| `encryption.entities.managedServices`, `enhancedSecurityCompliance` | Available | **Supported** |
+| `publicNetworkAccess` | Front-end **and** back-end Private Link | **Front-end-only** Private Link |
+
+**Default storage:**
+- Fully managed object storage **in the Databricks account**. It backs internal storage, workspace storage, and the workspace's default catalog.
+- Catalogs on default storage can be created **only from serverless workspaces**.
+- Dropped objects have a **7-day recovery window** by default, then purge within 48 hours.
+
+**Default storage constraints:**
+- **Classic compute can't read data in default storage.** Other workspaces can be granted access, but they must use serverless compute.
+- **No credential vending or direct file access** for external Iceberg and Delta clients. BI tools work over ODBC/JDBC, and the Files API serves volumes.
+- ODBC/JDBC results larger than about **5 MiB (Cloud Fetch) fail over front-end Private Link.**
+
+**Mixed estates:**
+- Keep shared data in **your own ADLS Gen2**, through external locations or catalog managed locations.
+- A serverless workspace can still connect to your storage accounts for managed and external tables.
+- Rule of thumb: **default storage for the workspace catalog and quick starts, your storage for the lake.**
+
+### C. Premium is the only tier ⚠️
+
+**Standard tier end of life:**
+- **April 1, 2026:** new workspaces must be **Premium**.
+- **October 1, 2026:** automatic upgrades of the remaining Standard workspaces to Premium **began**, rolling out in phases.
+- The portal, ARM (`sku.name`), and Terraform (`sku`) still list `standard` and `trial` values, so **expect old examples in the wild.**
+
+**What Premium always gated:**
+- Unity Catalog and metastore attachment
+- Databricks SQL, serverless compute, Lakeflow pipelines, Mosaic AI, Lakebase
+- RBAC (access control), IP access lists, Private Link, diagnostic logs
+- Customer-managed keys, double encryption, the Enhanced Security and Compliance add-on
+
+**Upgrading a Standard workspace:**
+- Azure portal: open the workspace → **Upgrade to Premium**. ARM or API also work.
+- **VNet-injected workspaces upgrade only through the portal or an ARM template.**
+- Notebooks, users, and cluster configurations are kept. **Running clusters may terminate.**
+- **Access control settings start disabled after the upgrade, and can't be disabled once enabled.**
+
+**Where to see the tier:** the **account console → Workspaces** page shows each workspace's current tier. It's the quickest way to inventory an estate during the phased upgrade.
+
+### D. Serverless vs classic side by side
+
+| Dimension | Serverless workspace | Classic (Hybrid) workspace |
+|---|---|---|
+| Azure prerequisites | **None beyond a resource group** | Managed RG name, optional VNet and subnets, NSG, NAT gateway or firewall path |
+| Compute location | Databricks subscription, same region | Your subscription (managed RG), plus optional serverless |
+| Workspace storage | **Default storage** (Databricks-managed) | The `dbstorage` account in the managed RG |
+| Network control | Egress network policies, **NCC private endpoints**, front-end Private Link | VNet injection, UDRs, Azure Firewall, front-end and back-end Private Link |
+| Encryption scopes | **Managed services key only** | Managed services, managed disks, workspace storage, double encryption |
+| Who can create it | Still an Azure resource: **Contributor or Owner** at subscription level (or the documented custom role). No VNet, storage, or networking rights needed. | The same Azure role, **plus Network Contributor on the VNet** if you inject one |
+
+> Exam angles:
+> - "Must use Scala/R, ExpressRoute, or inspect traffic" → **Hybrid**.
+> - "Wants CMK for managed disks, or back-end Private Link" → **Hybrid**. Serverless supports only the managed services key and front-end Private Link.
+> - "Classic cluster can't read a table in default storage" → expected. Move shared data to your own ADLS Gen2.
+> - "Change an existing workspace from Hybrid to Serverless" → **not possible**. `computeMode` is fixed. Create a new workspace.
+
+### Key takeaways
+
+- Workspace type is Serverless or Hybrid (classic), set by `computeMode` at creation and never changed.
+- Serverless workspaces need no managed RG, VNet, storage account, or access connector. Only the managed services key and the compliance add-on apply.
+- Classic compute can't read default storage. Keep shared data in your own ADLS Gen2.
+- Serverless workspaces are GA on Azure (January 30, 2026). Check the region table.
+- No new Standard workspaces from April 1, 2026. Phased automatic upgrades to Premium began October 1, 2026.
+
+### Course vs docs
+
+- No conflicts with the DP-750 notes: both say Standard is gone for new workspaces from April 1, 2026. This lesson adds the **October 1, 2026 automatic upgrade** of existing Standard workspaces.
+- The course itself warns that one portal deployment page still shows a **"Public Preview"** label for serverless workspaces even though they're GA. If an exam question or doc page calls them preview, it's out of date.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Serverless workspaces](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace/serverless-workspaces)
+- [Default storage](https://learn.microsoft.com/en-us/azure/databricks/storage/default-storage)
+- [Standard tier retirement](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/standard-tier)
+- [Account settings](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/account)
+- [Feature region support](https://learn.microsoft.com/en-us/azure/databricks/resources/feature-region-support)
+- [Create a metastore](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/create-metastore)
+- [Enable workspaces for Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/enable-workspaces)
+- [Release notes, January 2026](https://learn.microsoft.com/en-us/azure/databricks/release-notes/product/2026/january)
+
+### ⚡ Quick review
+
+- [ ] What ARM property sets the workspace type? Can you change it later?
+- [ ] Name 3 reasons you'd still need a Hybrid workspace.
+- [ ] Which 4 regions have serverless compute but no serverless workspaces?
+- [ ] Which encryption and Private Link options does a serverless workspace support?
+- [ ] Can classic compute read default storage? Where should shared data live?
+- [ ] Key dates: Standard tier end for new workspaces, and the start of automatic upgrades
+- [ ] What's kept and what can break when you upgrade Standard → Premium? What about VNet-injected workspaces?
+- [ ] Extra Azure role needed to create a VNet-injected workspace?
+
+---
+
+<!-- Next: 1.3 Deploying Workspaces -->
