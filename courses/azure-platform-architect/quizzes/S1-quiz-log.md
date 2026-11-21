@@ -50,3 +50,20 @@ Score: **6/6**
 ### Weak spots
 
 - **Workspace ID vs account ID: fixed on the 3rd try (1.3 Q6).** Re-test once more in a later section to confirm it has stuck.
+
+## 1.4 Account Administration on Azure (2026-11-21)
+
+Score: **6/6**
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Order: Global Admin signs in → first account admin auto-created → delegate → remove Global Admin | BDAC | BDAC | ✓ |
+| 2 | Invoiced cost with discounts and DBCU drawdown → Azure Cost Management + Billing | C | C | ✓ |
+| 3 | 100 private endpoints per region across NCCs is an account cap; subscriptions don't help | B | B | ✓ |
+| 4 | Later account admins need no Entra role; Contributor → workspace admin on first login (TWO) | AC | AC | ✓ |
+| 5 | One metastore per region → isolate with a catalog | D | D | ✓ |
+| 6 | Older DBU usage report leaves out serverless → use `system.billing.usage` dashboards | A | A | ✓ |
+
+### Weak spots
+
+- None this round.
