@@ -242,4 +242,145 @@ Two decisions frame every deployment: the **workspace type** (chosen once at cre
 
 ---
 
-<!-- Next: 1.3 Deploying Workspaces -->
+## 1.3 Deploying Workspaces
+
+Lecture, 12 min. Theme: *the ARM resource and the ways to write it.*
+
+Objectives: deploy through the portal, ARM/Bicep, and Terraform; identify the creation-time decisions that can't be changed later.
+
+Every deployment tool ends in the same place: one `Microsoft.Databricks/workspaces` resource with a handful of properties. DP-750 covered the four basic creation methods (portal, IaC, PowerShell, CLI) in [LP1-M1 §2](../../dp-750/notes/LP1-M1-explore-azure-databricks.md#2-workspaces-creating-one). This lesson goes deeper into the properties and into what's fixed for life.
+
+### A. Prerequisites ⚠️
+
+**Azure RBAC**
+- **Contributor or Owner at subscription level**, or a custom role with `Microsoft.Databricks/workspaces/*`, `Microsoft.Databricks/accessConnectors/*`, resource group read/write, and deployment read/write/validate.
+- **VNet injection adds Network Contributor on the VNet**, or `subnets/join/action` and `subnets/write`.
+- **The creator becomes the first workspace admin, and stays admin even if the Azure role is removed later.**
+
+**Resource providers and quotas**
+- Register **`Microsoft.Databricks`**, plus `Microsoft.Compute`, `Microsoft.ManagedIdentity`, `Microsoft.Storage`, and `Microsoft.Network` in the subscription.
+- **vCPU quota per VM family** in the region.
+- **Free Trial subscriptions can't create workspaces at all.**
+- Limits worth knowing: 980 resource groups per subscription, and 250 storage accounts per region per subscription (1,000 on request).
+
+**Region and feature availability**
+- 45 Azure regions. Some are served by a control plane in a paired region.
+- Serverless workspaces, serverless compute, and Managed DR each have their own region lists.
+- **Azure Government regions lack the account console, Databricks SQL, and Unity Catalog.**
+
+**Deployment states:** Provisioning, Running, Failed, Banned, Cancelling. Creation usually takes minutes but can take hours. **A failed deployment still leaves a workspace resource in the Failed state. Delete it and redeploy instead of trying to repair it.**
+
+### B. The workspace resource ⚠️
+
+Resource type `Microsoft.Databricks/workspaces`. **Latest stable API: `2026-01-01`**, the first stable version with the required `computeMode` property (`2024-05-01` doesn't have it).
+
+| Property | Purpose |
+|---|---|
+| `sku.name` | `premium`, or `trial` for the 14-day Premium trial. The schema still accepts `standard`, but new Standard workspaces have been refused since April 1, 2026. |
+| `computeMode` | `Hybrid` (classic) or `Serverless`. **Required on create, immutable.** |
+| `managedResourceGroupId` | Full resource ID of the managed RG. Required for Hybrid, not allowed for Serverless. |
+| `parameters.customVirtualNetworkId`, `customPublicSubnetName`, `customPrivateSubnetName` | VNet injection: your VNet, plus the host and container subnets |
+| `parameters.enableNoPublicIp` | **Secure cluster connectivity (SCC).** Defaults to true from API `2024-05-01` and is becoming mandatory. |
+| `parameters.natGatewayName`, `publicIpName`, `vnetAddressPrefix`, `storageAccountName`, `storageAccountSkuName` | Managed VNet and workspace storage naming and sizing |
+| `parameters.prepareEncryption`, `requireInfrastructureEncryption` | Managed identity for the workspace storage CMK; double encryption (**creation only**) |
+| `publicNetworkAccess`, `requiredNsgRules` | Private Link posture. `Disabled` + `NoAzureDatabricksRules` for back-end Private Link (Section 3). |
+| `encryption.entities.managedServices` and `managedDisk` | Customer-managed keys for control-plane data and cluster disks |
+| `defaultStorageFirewall`, `accessConnector` | Workspace storage firewall, with an access connector outside the managed RG |
+| `enhancedSecurityCompliance` | Compliance security profile, enhanced security monitoring, automatic cluster update |
+| `defaultCatalog` | Initial name and type of the workspace's default catalog |
+
+### C. Portal, Bicep, and the IaC alternatives
+
+| Tool | Key facts |
+|---|---|
+| **Azure portal** | Create a resource → Analytics → Azure Databricks. **Basics** tab: name, region, tier, **Workspace type**. **Networking** tab: SCC (No Public IP, defaults to Yes) and the VNet injection switch. Setting public network access to No means no public network access. Then the Encryption, Security and compliance, and Tags tabs → Review + create. Good for learning the moving parts, not for your tenth workspace. |
+| **ARM / Bicep** | The native declaration. `az deployment group create --template-file main.bicep` with a `.bicepparam` file. **`what-if` previews the change.** The Azure Verified Module **`avm/res/databricks/workspace`** wraps the resource. Access connectors, role assignments, VNets, and diagnostics live in the same template. |
+| **Terraform / OpenTofu** | `azurerm_databricks_workspace` (azurerm 5.x) with a `custom_parameters` block; `azurerm_databricks_access_connector` for identity. ⚠️ **The resource has no `computeMode` argument yet, so a serverless workspace needs Bicep or the `azapi` provider.** The `databricks` provider (1.140 at the time of writing) then configures the account and the workspace. OpenTofu runs the same providers from its own registry (`tofu init / plan / apply`). |
+| **stackql-deploy** | A manifest plus `.iql` query files, run by `stackql-deploy build {stack-dir} {stack-env}`. Workspaces and access connectors are `azure_isv.databricks.workspaces` and `access_connectors`. Account-level objects come from the `databricks_account` provider. |
+| **Pulumi** | `azure_native.databricks.Workspace` and `AccessConnector` in Python, TypeScript, Go, or .NET. The `pulumi_databricks` provider mirrors the Terraform resources for the account and workspace layers. State and secrets in Pulumi Cloud or your own backend. |
+| **Azure CLI** | `az databricks workspace create` with `--vnet`, `--public-subnet`, `--private-subnet`, `--enable-no-public-ip`, `--compute-mode`. `az databricks workspace update` for tier, public network access, NSG rules, storage firewall. Handy in pipelines and for one-off changes, **not a source of truth**. |
+
+**Bicep example: classic workspace with VNet injection** (from the lesson, trimmed):
+
+```bicep
+var mrgSuffix = uniqueString(workspaceName, resourceGroup().id)
+var managedResourceGroupId = '${subscription().id}/resourceGroups/databricks-rg-${workspaceName}-${mrgSuffix}'
+
+resource workspace 'Microsoft.Databricks/workspaces@2026-01-01' = {
+  name: workspaceName
+  location: location
+  sku: { name: 'premium' }
+  properties: {
+    computeMode: 'Hybrid'                 // 'Serverless' for a serverless workspace
+    managedResourceGroupId: managedResourceGroupId
+    parameters: {
+      customVirtualNetworkId: { value: vnetId }
+      customPublicSubnetName: { value: publicSubnetName }   // e.g. snet-dbx-host
+      customPrivateSubnetName: { value: privateSubnetName } // e.g. snet-dbx-container
+      enableNoPublicIp: { value: true }   // secure cluster connectivity (default true)
+    }
+    publicNetworkAccess: 'Enabled'
+    requiredNsgRules: 'AllRules'
+  }
+}
+
+output workspaceUrl string = workspace.properties.workspaceUrl
+output workspaceId string = workspace.properties.workspaceId
+```
+
+**There's no single winning tool.** The 1.7 demo deploys the same workspace with Bicep, then shows the Terraform/OpenTofu, stackql-deploy, and Pulumi equivalents. **Workspace-level content (jobs, pipelines, schemas, volumes) uses Declarative Automation Bundles** whichever tool you pick.
+
+### D. Creation-time decisions ⚠️
+
+| Fixed for life | One-way or preview only | Changeable later |
+|---|---|---|
+| Region, workspace name, `computeMode` | **Managed VNet → VNet injection**: a **Public Preview** ARM update (API `2026-01-01`) with **every cluster stopped**. Terraform doesn't support it, an existing back-end Private Link connection breaks and must be rebuilt, and there's no documented way back. | Pricing tier (upgrade), public network access, required NSG rules |
+| Managed RG name and workspace storage account name | **Secure cluster connectivity** can be turned on later (VNet injection required; the update can take more than 15 minutes). Turning it off is supported only as a temporary rollback. | Managed services and managed disk customer-managed keys |
+| **Double (infrastructure) encryption** | **Compliance security profile**: treat it as one-way (Section 3 covers the add-on) | Workspace storage firewall and its access connector, diagnostic settings, tags |
+| Managed VNet address prefix; injected subnet CIDR ranges | | NCC attachment, network policy, metastore assignment (account console) |
+
+**Announcements that change the defaults:** Databricks has announced that **new classic workspaces will require VNet injection** (managed VNet creation is being deprecated) and that **SCC will become mandatory**, with timelines to follow. **Design every new classic workspace with VNet injection and SCC on**, and choose subnet sizes (Section 3) before you deploy.
+
+> Exam angles:
+> - "Deployment failed, workspace shows Failed" → delete and redeploy. Don't try to repair it.
+> - "Need a serverless workspace from Terraform" → `azurerm` can't set `computeMode` yet. Use **Bicep or `azapi`**.
+> - "Want double encryption on an existing workspace" → not possible. It's creation-only, so you need a new workspace.
+> - "User's Contributor role removed, but they're still workspace admin" → expected. The creator stays the first workspace admin.
+> - "Deploy fails in a brand new subscription" → check resource provider registration and vCPU quota. Or it's a Free Trial subscription.
+
+### Key takeaways
+
+- Contributor or Owner (or a custom role), plus registered resource providers and vCPU quota. Free Trial subscriptions can't deploy.
+- Learn the `Microsoft.Databricks/workspaces` properties once: `computeMode`, `managedResourceGroupId`, `parameters`, `publicNetworkAccess`, `requiredNsgRules`, `encryption`.
+- The portal is for learning, Bicep is the native declaration, and Terraform/OpenTofu, stackql-deploy, and Pulumi are equivalent alternatives.
+- Fixed for life: region, `computeMode`, managed RG name, storage account name, double encryption, subnet CIDRs.
+- Design new classic workspaces with VNet injection and SCC on. Both are becoming mandatory.
+
+### Course vs docs
+
+- No conflicts with DP-750 or with 1.1/1.2. The DP-750 CLI example (`az databricks workspace create ... --sku premium`) still works. This lesson adds `--compute-mode` and the networking flags.
+- Things that will go stale, so recheck before relying on them: the Terraform `azurerm` gap for `computeMode`, the "Public Preview" status of the managed VNet → VNet injection migration, the `databricks` provider version (1.140), and the announced timelines for mandatory VNet injection and SCC.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Workspace administration](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace/)
+- [Create a workspace](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace/create-workspace)
+- [Deploy with Bicep](https://learn.microsoft.com/en-us/azure/databricks/admin/workspace/bicep)
+- [Deploy with Terraform](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/terraform/azure-workspace)
+- [Update workspace network configuration](https://learn.microsoft.com/en-us/azure/databricks/security/network/classic/update-workspaces)
+
+### ⚡ Quick review
+
+- [ ] Which Azure roles can create a workspace? What extra role does VNet injection need?
+- [ ] Which 5 resource providers must be registered?
+- [ ] What happens to the creator's admin rights if their Azure role is removed?
+- [ ] What should you do with a workspace in the Failed state?
+- [ ] Which API version first has `computeMode`? What does `enableNoPublicIp` control?
+- [ ] Which property values give back-end Private Link?
+- [ ] Why can't the `azurerm` provider create a serverless workspace today? What do you use instead?
+- [ ] List 4 things that are fixed for life, and 3 that can be changed later.
+- [ ] What are the conditions and catches of migrating a managed VNet to VNet injection?
+
+---
+
+<!-- Next: 1.4 Account Administration on Azure -->
