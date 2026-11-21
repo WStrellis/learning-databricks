@@ -16,3 +16,20 @@ Score: **5/6**
 ### Weak spots
 
 - **Workspace ID vs account ID.** The number after `adb-` in the workspace URL is the **workspace ID** (also after `?o=` on legacy URLs, in the account console's workspace list, and in Terraform outputs). The **account ID** is per Entra tenant, sits under the username menu in the account console, and never appears in a workspace URL. Re-test this next quiz.
+
+## 1.2 Workspace Types and Tiers (2026-11-21)
+
+Score: **5/6**
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Scala + ExpressRoute → Hybrid with VNet injection | B | B | ✓ |
+| 2 | `computeMode` fixed → new serverless workspace | C | C | ✓ |
+| 3 | Serverless supports managed services CMK + front-end PL (TWO) | AD | AD | ✓ |
+| 4 | Classic compute can't read default storage | B | B | ✓ |
+| 5 | Upgrade VNet-injected Standard → Premium (portal/ARM, access control one-way) | D | D | ✓ |
+| 6 | Re-test: where to find the Databricks account ID | A | B | ✗ |
+
+### Weak spots
+
+- **Workspace ID vs account ID: missed twice (1.1 Q4, 1.2 Q6).** Both times the answer picked the number from the workspace URL. The URL number is always the **workspace ID**. The **account ID** is a GUID, never appears in any workspace URL, and is found only in the **account console** (`accounts.azuredatabricks.net`) under the username menu. Keep re-testing until it sticks.
