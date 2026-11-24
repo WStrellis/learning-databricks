@@ -67,3 +67,20 @@ Score: **6/6**
 ### Weak spots
 
 - None this round.
+
+## 1.5 Unity Catalog Setup on Azure (2026-11-23)
+
+Score: **5/6**
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Order: access connector → Storage Blob Data Contributor → storage credential → external location | BDAC | BDAC | ✓ |
+| 2 | Assigning the storage role needs Owner or User Access Administrator | B | B | ✓ |
+| 3 | Storage firewall → access connector (managed identity) as trusted resource instance | C | C | ✓ |
+| 4 | Auto-enabled metastore: no root storage; workspace admins get privileges via system group (TWO) | CD | AC | ✗ |
+| 5 | UI volume upload fails → CORS rule on the Blob service | D | D | ✓ |
+| 6 | Premium storage can't use automatic file events mode | A | A | ✓ |
+
+### Weak spots
+
+- **Auto-enabled metastore defaults (1.5 Q4).** Picked "a Global Administrator must be named metastore admin" (D) instead of "created without root storage" (A). On auto-enabled metastores the **metastore admin is optional**: workspace admins get the key privileges through a system group, and the Global Admin is only needed to bootstrap the *account* (1.4), not the metastore. The metastore has **no root storage by design**; the workspace catalog uses the workspace storage account. Re-test in a later quiz.
