@@ -622,4 +622,132 @@ The **Access Connector for Azure Databricks** is a first-party Azure resource th
 
 ---
 
-<!-- Next: 1.6 Operating Azure Databricks Estates -->
+## 1.6 Operating Azure Databricks Estates
+
+Lecture, 10 min. Theme: *from one workspace to a governed, costed fleet.*
+
+Objectives: reconcile Azure Cost Management with the billing system tables; apply landing zone and DR patterns.
+
+### A. Interpreting billing information ⚠️
+
+A classic cluster run (for example, 1 driver + 4 workers for 2 hours) produces **two kinds of meters**:
+- **Infrastructure meters**: Virtual Machines, Managed Disks, Storage, NAT gateway, bandwidth → **Azure Cost Management**
+- **DBU meters**: the Azure Databricks service, per SKU (all-purpose, jobs, SQL) → **Azure Cost Management** *and* **`system.billing.usage`**
+
+**The two cost lenses:**
+
+| Lens | What it shows |
+|---|---|
+| **Azure Cost Management** (the invoice view) | DBU meters **plus** the VM, disk, storage, and network meters of the managed RG, in your billing currency, **after reservations and negotiated rates**. **Serverless usage shows up as DBU meters only.** |
+| **System tables** (the platform view) | **`system.billing.usage`** has DBU quantities per SKU with `custom_tags`, `usage_metadata` (cluster, job, warehouse IDs), and `identity_metadata`. **`system.billing.list_prices`** turns quantities into list-price dollars. Records arrive within **about 12 hours**. |
+| Account console Usage and Budgets | **List prices**, ignoring credits and discounts. The pre-purchase plan shows on-demand charges as **zero** in Azure usage data when covered. |
+
+**Review both lenses together.** Cheap DBUs on expensive VM SKUs, or an idle NAT gateway, only show up when you join them. **Tags are the join key.**
+
+### B. Tag propagation rules ⚠️
+
+Workspace, pool, and cluster tags are combined by Azure Databricks and **propagated to the Azure VMs in the managed RG**. That's what lets Cost analysis group infrastructure spend the same way system tables group DBUs.
+
+**Default tags**
+- All-purpose and jobs compute: `Vendor` = Databricks, `ClusterId`, `ClusterName`, `Creator`, plus `RunName` and `JobId` for jobs
+- SQL warehouses: `Vendor`, `ClusterId`, `SqlEndpointId`, `Creator`
+- Pools: `Vendor`, `DatabricksInstancePoolCreatorId`, `DatabricksInstancePoolId`
+
+**The `x_` prefix rule**
+- A custom tag whose key collides with a default tag is **renamed with an `x_` prefix** on propagation (`vendor` becomes `x_vendor`). The default tag keeps its name.
+- Conflicting tags set through **compute policies don't resolve**: cluster creation fails with an invalid settings error.
+- Cluster tags that conflict with pool tags **block cluster creation**.
+
+**The 50-tag cap**
+- **Azure allows at most 50 tags per resource.**
+- Over the cap, **`x_`-prefixed tags are dropped first** in alphabetical order, then the remaining tags alphabetically.
+- ⚠️ **Clusters launched from pools carry workspace and pool tags only. Cluster tags aren't propagated.**
+
+**Timing and characters**
+- **Workspace tag changes take up to an hour** to propagate. Cluster and pool tag changes apply after a **restart or pool expansion**.
+- Allowed characters: letters, spaces, numbers, and `+ - = . _ : / @`.
+- ⚠️ **Serverless usage never lands on a VM tag.** Use **serverless usage policies** (Public Preview) and `system.billing.usage` for it.
+
+> Exam angles:
+> - "Cost center tag missing on VMs for pool-backed clusters" → pool clusters only get **workspace and pool** tags. Put the tag on the pool or workspace.
+> - "Team tagged `vendor=acme`; on the VM it's `x_vendor`" → expected, because it collided with the default `Vendor` tag.
+> - "How do you attribute serverless spend by team?" → **serverless usage policies** + `system.billing.usage`. There are no VMs to tag.
+> - "Finance's numbers don't match the account console" → console is list price; Cost Management is after discounts and reservations.
+
+### C. Estate topology and landing zones
+
+**A typical Azure estate** (lesson example):
+
+```
+Databricks account (one per tenant)
+├── Metastore australiaeast
+└── NCC australiaeast
+     │
+     ├── Subscription: lakeside-dev   (metastore assignment)
+     │     ├── Workspace lakeside-dev      classic, managed VNet
+     │     └── Workspace lakeside-sandbox  serverless
+     ├── Subscription: lakeside-prod  (metastore + NCC assignment)
+     │     └── Workspace lakeside-prod     VNet injection, Private Link, CMK ──┐
+     └── Subscription: connectivity hub                                       │
+           └── Azure Firewall, ExpressRoute, private DNS zones  ◄─────────────┘
+```
+
+| Cloud Adoption Framework | Well-Architected service guide | Workspace strategy |
+|---|---|---|
+| The CAF cloud-scale analytics scenario (which included Azure Databricks pages) **now redirects to the Fabric-centred *Data for AI and Analytics* guidance**, which treats Azure Databricks as an integrated Azure service with its own pricing. **The landing-zone pattern still stands**: workspaces in a **workload landing zone**, the connectivity hub and identity in the **platform landing zone**. | *Architecture best practices for Azure Databricks* covers **reliability** (multi-region and DR), **security** (UC, CMK, SCC, Private Link, audit logs, one workspace per environment), **cost**, **operational excellence** (serverless workspaces, ARM and Bicep), and **performance**. ⚠️ Read its tier guidance against the Standard tier retirement (1.2). | **Split by SDLC environment with a subscription each**, share the regional metastore, **bind production catalogs to production workspaces**, and **isolate teams at catalog level rather than by workspace sprawl**. |
+
+### D. Disaster recovery ⚠️
+
+| DIY active-passive | Managed Disaster Recovery | Managed DR limits to know |
+|---|---|---|
+| A second workspace in another region, normally in the same account and tenant. **Databricks now points you to Managed DR first**, and keeps the DIY path for what Managed DR doesn't replicate, for active-active, and for cross-cloud. | **Gated**: apply through your account team. Needs **Premium in both regions** and the **Mission Critical add-on on both workspaces**. | **Not replicated:** managed volume data, secrets, models, serving endpoints, vector search indexes, Delta shares, and published dashboards. **Materialized views, streaming tables, and Lakeflow pipelines replicate only in Private Preview.** |
+| Replicate tables with **Deep Clone**. ⚠️ **Geo-redundant storage is not a substitute for the workspace storage account.** Configuration with IaC, code with Git. | Needs serverless compute, account-level SSO with AIM or SCIM, a **secondary metastore**, and an **NCC and access connector in the secondary region**. | **Secondary catalogs are read-only.** The initial bootstrap can take **up to five days** for large workspaces. |
+| **You own** the runbooks, the RPO and RTO testing, and the drift. | **Failover groups and stable URLs** in the account console under **Resilience**. **21 Azure regions**, with some pairs ruled out (**Australia East can't pair with Australia Southeast**). | **One failover group per workspace, ten catalogs per group.** |
+
+> Exam angles:
+> - "Is GRS on the workspace storage account enough for DR?" → **no**. Use Deep Clone or Managed DR.
+> - "Managed DR prerequisites" → Premium in both regions, Mission Critical add-on on both workspaces, serverless, account-level SSO with AIM/SCIM, secondary metastore, NCC + access connector in the secondary region, and approval through the account team.
+> - "Need secrets and serving endpoints in the DR region" → Managed DR doesn't replicate them. Handle with IaC (DIY).
+
+### Key takeaways
+
+- Azure Cost Management holds the invoice (DBU meters plus VM, disk, storage, network). `system.billing.usage` holds DBUs with tags and metadata. Join them by tag.
+- Tags propagate to Azure VMs. Conflicting custom keys get an `x_` prefix, and Azure caps resources at 50 tags.
+- Pool-launched clusters carry pool and workspace tags only. Serverless usage is tagged through usage policies.
+- One subscription per environment, one metastore per region, catalog-level isolation, hub connectivity in a platform landing zone.
+- Databricks recommends Managed DR for cross-region recovery. It's gated, needs Mission Critical on both workspaces, and has scope limits, so DIY active-passive stays for the rest.
+
+### Course vs docs
+
+- **CAF change:** the course notes that the CAF cloud-scale analytics guidance for Azure Databricks now redirects to the Fabric-centred *Data for AI and Analytics* guidance. Older study material that points to the cloud-scale analytics scenario is out of date, but the landing-zone pattern hasn't changed.
+- **Well-Architected tier guidance** may still mention Standard tier. The course says to read it against the Standard retirement in 1.2.
+- **Things likely to change:** serverless usage policies (Public Preview), Managed DR replication of MVs/streaming tables/pipelines (Private Preview), and the Managed DR region list (21 regions).
+- Fits with 1.4: account console Usage and Budgets are list price only, and the real invoice is in Azure Cost Management.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Billing system tables](https://learn.microsoft.com/en-us/azure/databricks/admin/system-tables/billing)
+- [Usage detail tags](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage-detail-tags)
+- [Usage (account settings)](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage)
+- [Managed disaster recovery](https://learn.microsoft.com/en-us/azure/databricks/admin/managed-disaster-recovery)
+- [Best practices](https://learn.microsoft.com/en-us/azure/databricks/getting-started/best-practices)
+- [Well-Architected service guide: Azure Databricks](https://learn.microsoft.com/en-us/azure/well-architected/service-guides/azure-databricks)
+- [CAF cloud-scale analytics: data ingestion](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/scenarios/cloud-scale-analytics/best-practices/data-ingestion)
+- [CAF landing zones](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/ready/landing-zone/)
+
+### ⚡ Quick review
+
+- [ ] What does Azure Cost Management show that `system.billing.usage` doesn't, and vice versa?
+- [ ] How fast do records arrive in `system.billing.usage`? Which table converts to list-price dollars?
+- [ ] What's the default tag set for jobs compute, SQL warehouses, and pools?
+- [ ] What happens when a custom tag key collides with a default tag? With a compute policy tag? With a pool tag?
+- [ ] What's the Azure tag cap per resource, and which tags are dropped first?
+- [ ] Which tags does a pool-launched cluster carry?
+- [ ] How long do workspace tag changes take? How do you tag serverless spend?
+- [ ] What's the recommended workspace and subscription strategy?
+- [ ] Managed DR: prerequisites, what isn't replicated, and limits per workspace and group
+- [ ] Why isn't GRS a DR plan for the workspace storage account?
+
+---
+
+<!-- Next: 1.7 Demo: Azure Databricks Workspace Administration Fundamentals -->
