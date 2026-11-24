@@ -86,3 +86,20 @@ Score: **5/6**
 ### Weak spots
 
 - **Auto-enabled metastore defaults (1.5 Q4).** Picked "a Global Administrator must be named metastore admin" (D) instead of "created without root storage" (A). On auto-enabled metastores the **metastore admin is optional**: workspace admins get the key privileges through a system group, and the Global Admin is only needed to bootstrap the *account* (1.4), not the metastore. The metastore has **no root storage by design**; the workspace catalog uses the workspace storage account. Re-test in a later quiz.
+
+## 1.6 Operating Azure Databricks Estates (2026-11-23)
+
+Score: **6/6** (first quiz with placeholder-only format instructions, so this score is reliable)
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Pool-launched clusters don't carry cluster tags → tag the pool or workspace | C | C | ✓ |
+| 2 | Collision with default `Vendor` tag → `x_vendor` | B | B | ✓ |
+| 3 | Cost Management is after discounts; serverless = DBU meters only (TWO) | AC | AC | ✓ |
+| 4 | NOT a Managed DR requirement: GRS on workspace storage | D | D | ✓ |
+| 5 | Serverless spend by team → serverless usage policies + `system.billing.usage` | D | D | ✓ |
+| 6 | Over 50 tags → `x_` tags dropped first, alphabetically | A | A | ✓ |
+
+### Weak spots
+
+- None this round.
