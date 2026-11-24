@@ -1,5 +1,7 @@
 # S1 quiz log
 
+> ⚠️ **Scores for 1.1–1.5 are not reliable.** The "reply in a format like…" example in each quiz matched the real answers, at least in part. Use a fresh Section 1 re-quiz as the real baseline.
+
 ## 1.1 Azure Databricks Service Architecture (2026-11-21)
 
 Score: **5/6**
