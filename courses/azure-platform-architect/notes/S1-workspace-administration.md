@@ -634,6 +634,23 @@ A classic cluster run (for example, 1 driver + 4 workers for 2 hours) produces *
 - **Infrastructure meters**: Virtual Machines, Managed Disks, Storage, NAT gateway, bandwidth → **Azure Cost Management**
 - **DBU meters**: the Azure Databricks service, per SKU (all-purpose, jobs, SQL) → **Azure Cost Management** *and* **`system.billing.usage`**
 
+```mermaid
+flowchart LR
+    run["Classic cluster run<br/>1 driver + 4 workers, 2 h"]
+    infra["Infrastructure meters<br/>VMs, disks, storage,<br/>NAT gateway, bandwidth"]
+    dbu["DBU meters<br/>per SKU: all-purpose,<br/>jobs, SQL"]
+    acm["Azure Cost Management<br/>invoice view<br/>after discounts + reservations"]
+    sys["system.billing.usage<br/>platform view<br/>DBUs + custom_tags + metadata"]
+    lp["system.billing.list_prices<br/>list-price dollars"]
+    run --> infra
+    run --> dbu
+    infra --> acm
+    dbu --> acm
+    dbu --> sys
+    sys --> lp
+    acm -. "join on tags" .- sys
+```
+
 **The two cost lenses:**
 
 | Lens | What it shows |
@@ -647,6 +664,22 @@ A classic cluster run (for example, 1 driver + 4 workers for 2 hours) produces *
 ### B. Tag propagation rules ⚠️
 
 Workspace, pool, and cluster tags are combined by Azure Databricks and **propagated to the Azure VMs in the managed RG**. That's what lets Cost analysis group infrastructure spend the same way system tables group DBUs.
+
+```mermaid
+flowchart TD
+    ws["Workspace tags"]
+    pool["Pool tags"]
+    cl["Cluster tags"]
+    dflt["Default tags<br/>Vendor, ClusterId, Creator, ..."]
+    merge{"Azure Databricks<br/>combines tags"}
+    vm["Azure VMs in the<br/>managed resource group<br/>max 50 tags"]
+    ws --> merge
+    pool --> merge
+    cl -- "standalone clusters only<br/>(not for pool-launched clusters)" --> merge
+    dflt --> merge
+    merge -- "key collides with a default:<br/>renamed x_key" --> vm
+    sl["Serverless usage"] -- "no VM to tag" --> pol["Serverless usage policies<br/>+ system.billing.usage"]
+```
 
 **Default tags**
 - All-purpose and jobs compute: `Vendor` = Databricks, `ClusterId`, `ClusterName`, `Creator`, plus `RunName` and `JobId` for jobs
@@ -678,18 +711,31 @@ Workspace, pool, and cluster tags are combined by Azure Databricks and **propaga
 
 **A typical Azure estate** (lesson example):
 
-```
-Databricks account (one per tenant)
-├── Metastore australiaeast
-└── NCC australiaeast
-     │
-     ├── Subscription: lakeside-dev   (metastore assignment)
-     │     ├── Workspace lakeside-dev      classic, managed VNet
-     │     └── Workspace lakeside-sandbox  serverless
-     ├── Subscription: lakeside-prod  (metastore + NCC assignment)
-     │     └── Workspace lakeside-prod     VNet injection, Private Link, CMK ──┐
-     └── Subscription: connectivity hub                                       │
-           └── Azure Firewall, ExpressRoute, private DNS zones  ◄─────────────┘
+```mermaid
+flowchart TB
+    subgraph acct["Databricks account (one per Entra tenant)"]
+        ms["Metastore<br/>australiaeast"]
+        ncc["NCC<br/>australiaeast"]
+    end
+    subgraph wl["Workload landing zone"]
+        subgraph dev["Subscription: lakeside-dev"]
+            wdev["Workspace lakeside-dev<br/>classic, managed VNet"]
+            wsb["Workspace lakeside-sandbox<br/>serverless"]
+        end
+        subgraph prod["Subscription: lakeside-prod"]
+            wprod["Workspace lakeside-prod<br/>VNet injection, Private Link, CMK"]
+        end
+    end
+    subgraph plat["Platform landing zone"]
+        subgraph hub["Subscription: connectivity hub"]
+            net["Azure Firewall, ExpressRoute,<br/>private DNS zones"]
+        end
+    end
+    ms -- "metastore assignment" --> wdev
+    ms --> wsb
+    ms -- "metastore assignment" --> wprod
+    ncc -- "NCC assignment" --> wprod
+    wprod -- "peering and egress" --- net
 ```
 
 | Cloud Adoption Framework | Well-Architected service guide | Workspace strategy |
@@ -697,6 +743,20 @@ Databricks account (one per tenant)
 | The CAF cloud-scale analytics scenario (which included Azure Databricks pages) **now redirects to the Fabric-centred *Data for AI and Analytics* guidance**, which treats Azure Databricks as an integrated Azure service with its own pricing. **The landing-zone pattern still stands**: workspaces in a **workload landing zone**, the connectivity hub and identity in the **platform landing zone**. | *Architecture best practices for Azure Databricks* covers **reliability** (multi-region and DR), **security** (UC, CMK, SCC, Private Link, audit logs, one workspace per environment), **cost**, **operational excellence** (serverless workspaces, ARM and Bicep), and **performance**. ⚠️ Read its tier guidance against the Standard tier retirement (1.2). | **Split by SDLC environment with a subscription each**, share the regional metastore, **bind production catalogs to production workspaces**, and **isolate teams at catalog level rather than by workspace sprawl**. |
 
 ### D. Disaster recovery ⚠️
+
+```mermaid
+flowchart TD
+    q2{"Cross-region DR:<br/>need active-active<br/>or cross-cloud?"}
+    q3{"Eligible for Managed DR?<br/>Premium in both regions,<br/>Mission Critical on both,<br/>approved by account team"}
+    mdr["Managed DR<br/>failover group + stable URL<br/>secondary catalogs read-only"]
+    diy["DIY active-passive<br/>Deep Clone + IaC + Git<br/>you own RPO/RTO testing"]
+    gap["Plus DIY for what Managed DR<br/>doesn't replicate: volumes data,<br/>secrets, models, serving endpoints,<br/>vector indexes, shares, dashboards"]
+    q2 -- yes --> diy
+    q2 -- no --> q3
+    q3 -- yes --> mdr
+    q3 -- no --> diy
+    mdr --> gap
+```
 
 | DIY active-passive | Managed Disaster Recovery | Managed DR limits to know |
 |---|---|---|
