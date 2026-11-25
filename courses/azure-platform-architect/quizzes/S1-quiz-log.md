@@ -85,7 +85,7 @@ Score: **5/6**
 
 ### Weak spots
 
-- **Auto-enabled metastore defaults (1.5 Q4).** Picked "a Global Administrator must be named metastore admin" (D) instead of "created without root storage" (A). On auto-enabled metastores the **metastore admin is optional**: workspace admins get the key privileges through a system group, and the Global Admin is only needed to bootstrap the *account* (1.4), not the metastore. The metastore has **no root storage by design**; the workspace catalog uses the workspace storage account. Re-test in a later quiz.
+- **Auto-enabled metastore defaults (1.5 Q4).** Picked "a Global Administrator must be named metastore admin" (D) instead of "created without root storage" (A). On auto-enabled metastores the **metastore admin is optional**: workspace admins get the key privileges through a system group, and the Global Admin is only needed to bootstrap the *account* (1.4), not the metastore. The metastore has **no root storage by design**; the workspace catalog uses the workspace storage account on classic workspaces, or default storage on serverless workspaces. Re-test in a later quiz.
 
 ## 1.6 Operating Azure Databricks Estates (2026-11-23)
 

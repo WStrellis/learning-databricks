@@ -511,20 +511,29 @@ UC basics (three-level namespace, managed vs external tables, GRANTs, Purview) a
 ### A. The regional metastore ⚠️
 
 - **Automatic UC enablement** for new workspaces began rolling out on **November 9, 2023**. Verify the metastore assignment of the actual workspace rather than assuming.
-- Automatic enablement creates the regional metastore **without metastore-level managed storage** ("no root storage by design"). Each workspace gets a **workspace catalog** whose managed location is the **workspace storage account** (`dbstorage`).
+- Automatic enablement creates the regional metastore **without metastore-level managed storage** ("no root storage by design"). Each workspace gets a **workspace catalog**. Where its managed location lives depends on the workspace type:
+  - **Classic (Hybrid):** the **workspace storage account** (`dbstorage`) in the managed resource group.
+  - **Serverless:** Databricks **default storage**, in your Azure Databricks account. There's no `dbstorage` account ([default storage](https://learn.microsoft.com/en-us/azure/databricks/storage/default-storage): "Serverless workspaces use default storage for internal and workspace storage").
 - **One metastore per region.** Attach every workspace in that region to it.
 
 **How the pieces chain together** (lesson example):
 
 ```
 Metastore (australiaeast) ── no root storage
-├── Workspace catalog ── managed location in the dbstorage account
+├── Workspace catalog ── managed location in dbstorage (classic) or default storage (serverless)
 └── Catalog: lakeside_claims ── managed location abfss://claims@lakesidelake.dfs.core.windows.net/managed
-        └── External location: claims_landing ── abfss://landing@lakesidelake.dfs.core.windows.net/
-              └── Storage credential ── Azure managed identity via the access connector
+        │                        (must sit inside an external location ↓)
+        ├── External location: claims ─────── abfss://claims@lakesidelake.dfs.core.windows.net/
+        │                                     covers the catalog's managed path
+        └── External location: claims_landing ─ abfss://landing@lakesidelake.dfs.core.windows.net/
+                                              raw files, a different container, no overlap
+              both use ↓
+              Storage credential ── Azure managed identity via the access connector
                     └── Access Connector for Azure Databricks (Microsoft.Databricks/accessConnectors)
                           └── [Storage Blob Data Contributor] → lakesidelake (ADLS Gen2, hierarchical namespace)
 ```
+
+> **Changed from the course diagram.** The course showed only `claims_landing` (on the `landing` container) under a catalog whose managed location is in the `claims` container. That external location doesn't cover the managed path. Per the docs, managed locations are defined using external locations ([ADLS external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls): "Define managed storage locations using external locations"), so the diagram above adds an external location on the `claims` container.
 
 **Details:**
 - **The metastore admin is optional** on auto-enabled metastores. **Workspace admins** receive CREATE CATALOG, CREATE EXTERNAL LOCATION, CREATE STORAGE CREDENTIAL, CREATE SERVICE CREDENTIAL, CREATE CONNECTION, and related privileges **through a system group**.
@@ -540,9 +549,15 @@ The **Access Connector for Azure Databricks** is a first-party Azure resource th
 |---|---|---|
 | 1. Create the connector | **Contributor or Owner on the resource group** | `Microsoft.Databricks/accessConnectors` with `identity.type = SystemAssigned` (or attach a user-assigned identity) |
 | 2. Grant storage access | **Owner or User Access Administrator on the storage account** | **Storage Blob Data Contributor** on the account, **or** Storage Blob Delegator on the account plus Storage Blob Data Contributor on a container |
-| 3. Grant file-event access | Same | **Storage Queue Data Contributor**, **Storage Account Contributor** (so Databricks can create the queue), and **EventGrid Data Contributor** on the resource group |
+| 3. Grant file-event access | **Owner or User Access Administrator on the storage account** (for the two storage roles) **and on the resource group** (for the Event Grid role) | **Storage Queue Data Contributor** and **Storage Account Contributor** (so Databricks can create the queue) **on the storage account**, plus an **Event Grid role on the resource group**: **EventGrid EventSubscription Contributor** per most docs (see the ⚠️ docs discrepancy below) |
 | 4. Create the storage credential | **CREATE STORAGE CREDENTIAL** on the metastore | Credential type **Azure Managed Identity**, with the connector's **resource ID** (and, for user-assigned, the identity's resource ID) |
 | 5. Create external locations | **CREATE EXTERNAL LOCATION** on the metastore **and** the credential | `CREATE EXTERNAL LOCATION name URL 'abfss://container@account.dfs.core.windows.net/path' WITH (STORAGE CREDENTIAL cred)` |
+
+> ⚠️ **Docs discrepancy: which Event Grid role?** (checked 2026-11-24)
+> - **EventGrid EventSubscription Contributor**: [Azure managed identities](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities) (Step 3) and [ADLS external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls) (Step 4, on the resource group).
+> - **EventGrid Data Contributor**: [Manage external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/manage-external-locations) (on the resource group) and this course.
+>
+> Two of the three doc pages say **EventSubscription Contributor**, and it matches the job: Databricks has to create the Event Grid *subscription*. Use it in practice. On a quiz, pick whichever role name appears among the options; if both appear, prefer EventSubscription Contributor. All pages agree it's assigned at **resource group** scope, so the person assigning it needs Owner or User Access Administrator there, not just on the storage account.
 
 **Why managed identities and not service principals:**
 - No secrets to store or rotate.
@@ -552,7 +567,7 @@ The **Access Connector for Azure Databricks** is a first-party Azure resource th
 > Exam angles:
 > - "Who assigns Storage Blob Data Contributor to the connector?" → someone with **Owner or User Access Administrator** on the storage account. Contributor isn't enough to assign roles.
 > - "Storage account has a firewall; UC access fails with a service principal credential" → switch to an **access connector (managed identity)**. Only that can pass the firewall as a trusted resource instance.
-> - "Auto Loader file-notification mode can't create its queue" → missing **Storage Queue Data Contributor / Storage Account Contributor / EventGrid Data Contributor**.
+> - "Auto Loader file-notification mode can't create its queue" → missing **Storage Queue Data Contributor / Storage Account Contributor** on the storage account, or the **Event Grid role (EventSubscription Contributor; one page says Data Contributor)** on the resource group.
 
 ### C. External locations, overlap, and CORS
 
@@ -583,8 +598,8 @@ The **Access Connector for Azure Databricks** is a first-party Azure resource th
 
 ### Key takeaways
 
-- One metastore per region. Automatic enablement rollout began November 9, 2023, and creates the metastore without root storage. The workspace catalog lives in the workspace storage account.
-- The access connector wraps a system- or user-assigned managed identity. Grant Storage Blob Data Contributor, plus the Queue, Storage Account, and EventGrid roles for file events.
+- One metastore per region. Automatic enablement rollout began November 9, 2023, and creates the metastore without root storage. The workspace catalog lives in the workspace storage account (classic) or in default storage (serverless).
+- The access connector wraps a system- or user-assigned managed identity. Grant Storage Blob Data Contributor, plus Storage Queue Data Contributor and Storage Account Contributor (storage account) and an Event Grid role (resource group) for file events.
 - Storage credential (Azure Managed Identity, connector resource ID), then external locations on `abfss://` paths. Locations can't overlap.
 - A CORS rule on the Blob service (origin `https://*.azuredatabricks.net`, PUT, `x-ms-blob-type`, max age 1800) enables UI uploads to managed volumes.
 - Default storage for serverless quick starts. Customer ADLS Gen2 when classic compute, external engines, or your own network and key controls are involved.
@@ -594,6 +609,10 @@ The **Access Connector for Azure Databricks** is a first-party Azure resource th
 - **Wording difference with DP-750:** DP-750 says metastores are "**typically** one per region". This course (and lesson 1.4's limits table) says **one per region** as a hard limit. For the exam, treat it as a limit: one metastore per region per account.
 - Both agree that automatic UC enablement started for workspaces created after November 9, 2023.
 - OneLake external locations are Beta. Expect this to change.
+- **Fixed after review (2026-11-24), checked against the docs:**
+  - Workspace catalog storage: the course's "workspace storage account" line only applies to classic workspaces. Serverless workspaces use default storage.
+  - Lesson diagram: the course's external location didn't cover the catalog's managed path. The diagram above is corrected.
+  - Event Grid role: the docs disagree with each other and with the course (see the discrepancy box in B). The scope is the resource group, so assigning it needs Owner or User Access Administrator there.
 
 ### Official references (from the lesson, checked 2026-10-27)
 
@@ -697,12 +716,14 @@ flowchart TD
 - ⚠️ **Clusters launched from pools carry workspace and pool tags only. Cluster tags aren't propagated.**
 
 **Timing and characters**
-- **Workspace tag changes take up to an hour** to propagate. Cluster and pool tag changes apply after a **restart or pool expansion**.
+- **Workspace tag changes take up to an hour** to propagate to Azure Databricks. ⚠️ That doesn't update compute that's already running or already created: new, changed, or deleted workspace tags **don't automatically reach existing compute**. Open the compute's details page → **Edit** → **Confirm and restart** ([usage detail tags](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage-detail-tags)).
+- Cluster and pool tag changes apply after a **restart or pool expansion**.
 - Allowed characters: letters, spaces, numbers, and `+ - = . _ : / @`.
 - ⚠️ **Serverless usage never lands on a VM tag.** Use **serverless usage policies** (Public Preview) and `system.billing.usage` for it.
 
 > Exam angles:
 > - "Cost center tag missing on VMs for pool-backed clusters" → pool clusters only get **workspace and pool** tags. Put the tag on the pool or workspace.
+> - "Added a workspace tag two hours ago; existing clusters still don't show it" → expected. Edit each compute resource and **Confirm and restart**.
 > - "Team tagged `vendor=acme`; on the VM it's `x_vendor`" → expected, because it collided with the default `Vendor` tag.
 > - "How do you attribute serverless spend by team?" → **serverless usage policies** + `system.billing.usage`. There are no VMs to tag.
 > - "Finance's numbers don't match the account console" → console is list price; Cost Management is after discounts and reservations.
@@ -749,9 +770,10 @@ flowchart TD
     q2{"Cross-region DR:<br/>need active-active<br/>or cross-cloud?"}
     q3{"Eligible for Managed DR?<br/>Premium in both regions,<br/>Mission Critical on both,<br/>approved by account team"}
     mdr["Managed DR<br/>failover group + stable URL<br/>secondary catalogs read-only"]
+    aa["Custom active-active or<br/>cross-cloud design<br/>both regions serve traffic"]
     diy["DIY active-passive<br/>Deep Clone + IaC + Git<br/>you own RPO/RTO testing"]
     gap["Plus DIY for what Managed DR<br/>doesn't replicate: volumes data,<br/>secrets, models, serving endpoints,<br/>vector indexes, shares, dashboards"]
-    q2 -- yes --> diy
+    q2 -- yes --> aa
     q2 -- no --> q3
     q3 -- yes --> mdr
     q3 -- no --> diy
