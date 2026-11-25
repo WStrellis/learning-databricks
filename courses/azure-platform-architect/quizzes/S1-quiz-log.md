@@ -1,5 +1,7 @@
 # S1 quiz log
 
+> ⚠️ **Scores for 1.1–1.5 are not reliable.** The "reply in a format like…" example in each quiz matched the real answers, at least in part. Use a fresh Section 1 re-quiz as the real baseline.
+
 ## 1.1 Azure Databricks Service Architecture (2026-11-21)
 
 Score: **5/6**
@@ -67,3 +69,61 @@ Score: **6/6**
 ### Weak spots
 
 - None this round.
+
+## 1.5 Unity Catalog Setup on Azure (2026-11-23)
+
+Score: **5/6**
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Order: access connector → Storage Blob Data Contributor → storage credential → external location | BDAC | BDAC | ✓ |
+| 2 | Assigning the storage role needs Owner or User Access Administrator | B | B | ✓ |
+| 3 | Storage firewall → access connector (managed identity) as trusted resource instance | C | C | ✓ |
+| 4 | Auto-enabled metastore: no root storage; workspace admins get privileges via system group (TWO) | CD | AC | ✗ |
+| 5 | UI volume upload fails → CORS rule on the Blob service | D | D | ✓ |
+| 6 | Premium storage can't use automatic file events mode | A | A | ✓ |
+
+### Weak spots
+
+- **Auto-enabled metastore defaults (1.5 Q4).** Picked "a Global Administrator must be named metastore admin" (D) instead of "created without root storage" (A). On auto-enabled metastores the **metastore admin is optional**: workspace admins get the key privileges through a system group, and the Global Admin is only needed to bootstrap the *account* (1.4), not the metastore. The metastore has **no root storage by design**; the workspace catalog uses the workspace storage account on classic workspaces, or default storage on serverless workspaces. Re-test in a later quiz.
+
+## 1.6 Operating Azure Databricks Estates (2026-11-23)
+
+Score: **6/6** (first quiz with placeholder-only format instructions, so this score is reliable)
+
+| # | Topic | Answer | Correct | Result |
+|---|---|---|---|---|
+| 1 | Pool-launched clusters don't carry cluster tags → tag the pool or workspace | C | C | ✓ |
+| 2 | Collision with default `Vendor` tag → `x_vendor` | B | B | ✓ |
+| 3 | Cost Management is after discounts; serverless = DBU meters only (TWO) | AC | AC | ✓ |
+| 4 | NOT a Managed DR requirement: GRS on workspace storage | D | D | ✓ |
+| 5 | Serverless spend by team → serverless usage policies + `system.billing.usage` | D | D | ✓ |
+| 6 | Over 50 tags → `x_` tags dropped first, alphabetically | A | A | ✓ |
+
+### Weak spots
+
+- None this round.
+
+## Section 1 mixed quiz, 1.1–1.6 (2026-11-24)
+
+Score: **8/10**. First reliable baseline for Section 1 (new questions, placeholder-only format).
+
+| # | Lesson | Topic | Answer | Correct | Result |
+|---|---|---|---|---|---|
+| 1 | 1.1 | What an Owner can still do with the managed RG (TWO) | AB | AC | ✗ |
+| 2 | 1.1 | Account ID location (weak-spot re-test) | C | C | ✓ |
+| 3 | 1.2 | Access control after Standard → Premium upgrade | A | A | ✓ |
+| 4 | 1.3 | Order: register providers → VNet/subnets → deploy workspace → assign metastore | BCDA | CDAB | ✗ |
+| 5 | 1.3 | Fixed for life: managed RG name, region (TWO) | AD | AD | ✓ |
+| 6 | 1.4 | Later account admins need no Entra role | C | C | ✓ |
+| 7 | 1.4 | 50 workspaces per NCC | D | D | ✓ |
+| 8 | 1.5 | No metastore admin → workspace admins via system group (weak-spot re-test) | C | C | ✓ |
+| 9 | 1.5 | Catalog managed location inside an external location on ADLS Gen2 (HNS) | A | A | ✓ |
+| 10 | 1.6 | Managed DR secondary catalogs are read-only | D | D | ✓ |
+
+### Weak spots
+
+- **Account ID vs workspace ID: confirmed fixed** (2nd correct in a row).
+- **Auto-enabled metastore privileges: fixed** (1.5 Q4 miss, now correct).
+- **Managed RG deny assignment (Q1).** Picked "add an NSG rule" (B). The deny assignment blocks writes to the NSG and other resources even for Owner. What you *can* do: read and list the deny assignment, delete the whole workspace, and choose the name at creation. Re-test.
+- **Deployment order (Q4).** Put "assign the metastore" first. A workspace must exist before it can be assigned to a metastore; prerequisites (providers, then networking) come before the deploy. Re-test with another ordering question.

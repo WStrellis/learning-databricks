@@ -500,4 +500,336 @@ Account console = `accounts.azuredatabricks.net` (one per Entra tenant; the acco
 
 ---
 
-<!-- Next: 1.5 Unity Catalog Setup on Azure -->
+## 1.5 Unity Catalog Setup on Azure
+
+Lecture, 12 min. Theme: *metastore, access connector, and the abfss path.*
+
+Objectives: create metastores and access connectors; wire storage credentials and external locations on ADLS Gen2.
+
+UC basics (three-level namespace, managed vs external tables, GRANTs, Purview) are in [DP-750 LP1-M1 §6](../../dp-750/notes/LP1-M1-explore-azure-databricks.md#6-governance-unity-catalog-and-microsoft-purview). This lesson is about the Azure plumbing: how UC reaches your storage.
+
+### A. The regional metastore ⚠️
+
+- **Automatic UC enablement** for new workspaces began rolling out on **November 9, 2023**. Verify the metastore assignment of the actual workspace rather than assuming.
+- Automatic enablement creates the regional metastore **without metastore-level managed storage** ("no root storage by design"). Each workspace gets a **workspace catalog**. Where its managed location lives depends on the workspace type:
+  - **Classic (Hybrid):** the **workspace storage account** (`dbstorage`) in the managed resource group.
+  - **Serverless:** Databricks **default storage**, in your Azure Databricks account. There's no `dbstorage` account ([default storage](https://learn.microsoft.com/en-us/azure/databricks/storage/default-storage): "Serverless workspaces use default storage for internal and workspace storage").
+- **One metastore per region.** Attach every workspace in that region to it.
+
+**How the pieces chain together** (lesson example):
+
+```
+Metastore (australiaeast) ── no root storage
+├── Workspace catalog ── managed location in dbstorage (classic) or default storage (serverless)
+└── Catalog: lakeside_claims ── managed location abfss://claims@lakesidelake.dfs.core.windows.net/managed
+        │                        (must sit inside an external location ↓)
+        ├── External location: claims ─────── abfss://claims@lakesidelake.dfs.core.windows.net/
+        │                                     covers the catalog's managed path
+        └── External location: claims_landing ─ abfss://landing@lakesidelake.dfs.core.windows.net/
+                                              raw files, a different container, no overlap
+              both use ↓
+              Storage credential ── Azure managed identity via the access connector
+                    └── Access Connector for Azure Databricks (Microsoft.Databricks/accessConnectors)
+                          └── [Storage Blob Data Contributor] → lakesidelake (ADLS Gen2, hierarchical namespace)
+```
+
+> **Changed from the course diagram.** The course showed only `claims_landing` (on the `landing` container) under a catalog whose managed location is in the `claims` container. That external location doesn't cover the managed path. Per the docs, managed locations are defined using external locations ([ADLS external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls): "Define managed storage locations using external locations"), so the diagram above adds an external location on the `claims` container.
+
+**Details:**
+- **The metastore admin is optional** on auto-enabled metastores. **Workspace admins** receive CREATE CATALOG, CREATE EXTERNAL LOCATION, CREATE STORAGE CREDENTIAL, CREATE SERVICE CREDENTIAL, CREATE CONNECTION, and related privileges **through a system group**.
+- **Manual creation** (account console → Catalog → Create metastore) asks for a name, region, an **optional** ADLS Gen2 path (the `abfss://` prefix is added for you), and an **optional** access connector ID.
+- ⚠️ **Assignment is one-way: enabling a workspace for UC can't be reversed.** Attach it through the metastore's **Workspaces** tab or with `databricks account metastore-assignments create`.
+- **Design guidance:** assign **managed storage at catalog level** for isolation. Leave the metastore **without root storage**, so a forgotten location fails fast instead of landing data in a shared account.
+
+### B. The access connector ⚠️
+
+The **Access Connector for Azure Databricks** is a first-party Azure resource that **wraps a managed identity**, so UC can reach your storage **without secrets**. It can carry a **system-assigned** identity, one or more **user-assigned** identities, or both. **Put it in the same region as the storage account.**
+
+| Step | Who | What |
+|---|---|---|
+| 1. Create the connector | **Contributor or Owner on the resource group** | `Microsoft.Databricks/accessConnectors` with `identity.type = SystemAssigned` (or attach a user-assigned identity) |
+| 2. Grant storage access | **Owner or User Access Administrator on the storage account** | **Storage Blob Data Contributor** on the account, **or** Storage Blob Delegator on the account plus Storage Blob Data Contributor on a container |
+| 3. Grant file-event access | **Owner or User Access Administrator on the storage account** (for the two storage roles) **and on the resource group** (for the Event Grid role) | **Storage Queue Data Contributor** and **Storage Account Contributor** (so Databricks can create the queue) **on the storage account**, plus an **Event Grid role on the resource group**: **EventGrid EventSubscription Contributor** per most docs (see the ⚠️ docs discrepancy below) |
+| 4. Create the storage credential | **CREATE STORAGE CREDENTIAL** on the metastore | Credential type **Azure Managed Identity**, with the connector's **resource ID** (and, for user-assigned, the identity's resource ID) |
+| 5. Create external locations | **CREATE EXTERNAL LOCATION** on the metastore **and** the credential | `CREATE EXTERNAL LOCATION name URL 'abfss://container@account.dfs.core.windows.net/path' WITH (STORAGE CREDENTIAL cred)` |
+
+> ⚠️ **Docs discrepancy: which Event Grid role?** (checked 2026-11-24)
+> - **EventGrid EventSubscription Contributor**: [Azure managed identities](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities) (Step 3) and [ADLS external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls) (Step 4, on the resource group).
+> - **EventGrid Data Contributor**: [Manage external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/manage-external-locations) (on the resource group) and this course.
+>
+> Two of the three doc pages say **EventSubscription Contributor**, and it matches the job: Databricks has to create the Event Grid *subscription*. Use it in practice. On a quiz, pick whichever role name appears among the options; if both appear, prefer EventSubscription Contributor. All pages agree it's assigned at **resource group** scope, so the person assigning it needs Owner or User Access Administrator there, not just on the storage account.
+
+**Why managed identities and not service principals:**
+- No secrets to store or rotate.
+- **Only a managed identity can be admitted through a storage firewall** as a trusted service or resource instance.
+- **Service principal storage credentials are documented as legacy.** Section 2 covers user-assigned identity patterns and firewall traversal in depth.
+
+> Exam angles:
+> - "Who assigns Storage Blob Data Contributor to the connector?" → someone with **Owner or User Access Administrator** on the storage account. Contributor isn't enough to assign roles.
+> - "Storage account has a firewall; UC access fails with a service principal credential" → switch to an **access connector (managed identity)**. Only that can pass the firewall as a trusted resource instance.
+> - "Auto Loader file-notification mode can't create its queue" → missing **Storage Queue Data Contributor / Storage Account Contributor** on the storage account, or the **Event Grid role (EventSubscription Contributor; one page says Data Contributor)** on the resource group.
+
+### C. External locations, overlap, and CORS
+
+**Path rules**
+- **ADLS Gen2 with the hierarchical namespace.** Azure Blob Storage (no HNS) isn't supported. **OneLake external locations are in Beta** (ID-based abfss paths, Databricks Runtime 18.1 or above, or serverless).
+- Paths use standard ASCII. **Immutable (WORM) containers are rejected.**
+- **Catalog and schema managed locations must sit inside an external location.** Managed locations can't overlap external tables or volumes, and **external locations can't overlap each other**.
+
+**CORS for volume uploads**
+- **Uploading files to managed volumes from the UI needs a CORS rule** on the storage account's **Blob** service.
+- Allowed origins `https://*.azuredatabricks.net`, allowed methods `PUT`, allowed headers `x-ms-blob-type`, exposed headers blank, max age `1800`.
+- Set it in the portal under **Settings → Resource sharing (CORS)**.
+
+**File events**
+- **On by default for new external locations.** They power Auto Loader and file-arrival triggers without per-pipeline wiring.
+- **Automatic** mode creates the queue and Event Grid subscription for you. **Provided** mode brings your own.
+- **Premium storage accounts can't use automatic mode** (queues need Standard).
+
+### D. Default storage or your own ADLS
+
+| Choose | When |
+|---|---|
+| **Default storage** (serverless workspaces) | Serverless-only estate, teams without Azure infrastructure rights, fastest start. BI over ODBC/JDBC and the Files API still work. |
+| **Customer-managed ADLS Gen2** via access connector | **Classic compute must read the data**, external engines need file-level or credential-vended access, or you need your own **CMK, firewall, private endpoints**, or other tools that write to the lake |
+| **Both** | Workspace catalog and scratch work on default storage; governed domain catalogs with managed locations on your storage accounts |
+
+(Ties back to 1.2: classic compute can't read default storage.)
+
+### Key takeaways
+
+- One metastore per region. Automatic enablement rollout began November 9, 2023, and creates the metastore without root storage. The workspace catalog lives in the workspace storage account (classic) or in default storage (serverless).
+- The access connector wraps a system- or user-assigned managed identity. Grant Storage Blob Data Contributor, plus Storage Queue Data Contributor and Storage Account Contributor (storage account) and an Event Grid role (resource group) for file events.
+- Storage credential (Azure Managed Identity, connector resource ID), then external locations on `abfss://` paths. Locations can't overlap.
+- A CORS rule on the Blob service (origin `https://*.azuredatabricks.net`, PUT, `x-ms-blob-type`, max age 1800) enables UI uploads to managed volumes.
+- Default storage for serverless quick starts. Customer ADLS Gen2 when classic compute, external engines, or your own network and key controls are involved.
+
+### Course vs docs
+
+- **Wording difference with DP-750:** DP-750 says metastores are "**typically** one per region". This course (and lesson 1.4's limits table) says **one per region** as a hard limit. For the exam, treat it as a limit: one metastore per region per account.
+- Both agree that automatic UC enablement started for workspaces created after November 9, 2023.
+- OneLake external locations are Beta. Expect this to change.
+- **Fixed after review (2026-11-24), checked against the docs:**
+  - Workspace catalog storage: the course's "workspace storage account" line only applies to classic workspaces. Serverless workspaces use default storage.
+  - Lesson diagram: the course's external location didn't cover the catalog's managed path. The diagram above is corrected.
+  - Event Grid role: the docs disagree with each other and with the course (see the discrepancy box in B). The scope is the resource group, so assigning it needs Owner or User Access Administrator there.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Create a metastore](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/create-metastore)
+- [Azure managed identities for UC](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/azure-managed-identities)
+- [External locations on ADLS](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls)
+- [Manage external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/manage-external-locations)
+- [Storage CORS](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/storage-cors)
+- [Default storage](https://learn.microsoft.com/en-us/azure/databricks/storage/default-storage)
+- [Standard tier](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/standard-tier)
+- [Enable workspaces for UC](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/enable-workspaces)
+- [OneLake external locations](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-onelake)
+
+### ⚡ Quick review
+
+- [ ] What does automatic UC enablement create, and what does it leave out?
+- [ ] Who gets CREATE CATALOG etc. on an auto-enabled metastore if there's no metastore admin?
+- [ ] Can you un-assign a workspace from UC?
+- [ ] Why leave the metastore without root storage?
+- [ ] Put the 5 access connector steps in order, with who does each one.
+- [ ] Which 3 extra roles do file events need? Which storage tier can't use automatic mode?
+- [ ] Why managed identity over service principal for storage credentials?
+- [ ] What are the CORS settings for volume uploads (origin, method, header, max age)?
+- [ ] Which storage types are rejected for external locations?
+- [ ] When must you use your own ADLS instead of default storage?
+
+---
+
+## 1.6 Operating Azure Databricks Estates
+
+Lecture, 10 min. Theme: *from one workspace to a governed, costed fleet.*
+
+Objectives: reconcile Azure Cost Management with the billing system tables; apply landing zone and DR patterns.
+
+### A. Interpreting billing information ⚠️
+
+A classic cluster run (for example, 1 driver + 4 workers for 2 hours) produces **two kinds of meters**:
+- **Infrastructure meters**: Virtual Machines, Managed Disks, Storage, NAT gateway, bandwidth → **Azure Cost Management**
+- **DBU meters**: the Azure Databricks service, per SKU (all-purpose, jobs, SQL) → **Azure Cost Management** *and* **`system.billing.usage`**
+
+```mermaid
+flowchart LR
+    run["Classic cluster run<br/>1 driver + 4 workers, 2 h"]
+    infra["Infrastructure meters<br/>VMs, disks, storage,<br/>NAT gateway, bandwidth"]
+    dbu["DBU meters<br/>per SKU: all-purpose,<br/>jobs, SQL"]
+    acm["Azure Cost Management<br/>invoice view<br/>after discounts + reservations"]
+    sys["system.billing.usage<br/>platform view<br/>DBUs + custom_tags + metadata"]
+    lp["system.billing.list_prices<br/>list-price dollars"]
+    run --> infra
+    run --> dbu
+    infra --> acm
+    dbu --> acm
+    dbu --> sys
+    sys --> lp
+    acm -. "join on tags" .- sys
+```
+
+**The two cost lenses:**
+
+| Lens | What it shows |
+|---|---|
+| **Azure Cost Management** (the invoice view) | DBU meters **plus** the VM, disk, storage, and network meters of the managed RG, in your billing currency, **after reservations and negotiated rates**. **Serverless usage shows up as DBU meters only.** |
+| **System tables** (the platform view) | **`system.billing.usage`** has DBU quantities per SKU with `custom_tags`, `usage_metadata` (cluster, job, warehouse IDs), and `identity_metadata`. **`system.billing.list_prices`** turns quantities into list-price dollars. Records arrive within **about 12 hours**. |
+| Account console Usage and Budgets | **List prices**, ignoring credits and discounts. The pre-purchase plan shows on-demand charges as **zero** in Azure usage data when covered. |
+
+**Review both lenses together.** Cheap DBUs on expensive VM SKUs, or an idle NAT gateway, only show up when you join them. **Tags are the join key.**
+
+### B. Tag propagation rules ⚠️
+
+Workspace, pool, and cluster tags are combined by Azure Databricks and **propagated to the Azure VMs in the managed RG**. That's what lets Cost analysis group infrastructure spend the same way system tables group DBUs.
+
+```mermaid
+flowchart TD
+    ws["Workspace tags"]
+    pool["Pool tags"]
+    cl["Cluster tags"]
+    dflt["Default tags<br/>Vendor, ClusterId, Creator, ..."]
+    merge{"Azure Databricks<br/>combines tags"}
+    vm["Azure VMs in the<br/>managed resource group<br/>max 50 tags"]
+    ws --> merge
+    pool --> merge
+    cl -- "standalone clusters only<br/>(not for pool-launched clusters)" --> merge
+    dflt --> merge
+    merge -- "key collides with a default:<br/>renamed x_key" --> vm
+    sl["Serverless usage"] -- "no VM to tag" --> pol["Serverless usage policies<br/>+ system.billing.usage"]
+```
+
+**Default tags**
+- All-purpose and jobs compute: `Vendor` = Databricks, `ClusterId`, `ClusterName`, `Creator`, plus `RunName` and `JobId` for jobs
+- SQL warehouses: `Vendor`, `ClusterId`, `SqlEndpointId`, `Creator`
+- Pools: `Vendor`, `DatabricksInstancePoolCreatorId`, `DatabricksInstancePoolId`
+
+**The `x_` prefix rule**
+- A custom tag whose key collides with a default tag is **renamed with an `x_` prefix** on propagation (`vendor` becomes `x_vendor`). The default tag keeps its name.
+- Conflicting tags set through **compute policies don't resolve**: cluster creation fails with an invalid settings error.
+- Cluster tags that conflict with pool tags **block cluster creation**.
+
+**The 50-tag cap**
+- **Azure allows at most 50 tags per resource.**
+- Over the cap, **`x_`-prefixed tags are dropped first** in alphabetical order, then the remaining tags alphabetically.
+- ⚠️ **Clusters launched from pools carry workspace and pool tags only. Cluster tags aren't propagated.**
+
+**Timing and characters**
+- **Workspace tag changes take up to an hour** to propagate to Azure Databricks. ⚠️ That doesn't update compute that's already running or already created: new, changed, or deleted workspace tags **don't automatically reach existing compute**. Open the compute's details page → **Edit** → **Confirm and restart** ([usage detail tags](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage-detail-tags)).
+- Cluster and pool tag changes apply after a **restart or pool expansion**.
+- Allowed characters: letters, spaces, numbers, and `+ - = . _ : / @`.
+- ⚠️ **Serverless usage never lands on a VM tag.** Use **serverless usage policies** (Public Preview) and `system.billing.usage` for it.
+
+> Exam angles:
+> - "Cost center tag missing on VMs for pool-backed clusters" → pool clusters only get **workspace and pool** tags. Put the tag on the pool or workspace.
+> - "Added a workspace tag two hours ago; existing clusters still don't show it" → expected. Edit each compute resource and **Confirm and restart**.
+> - "Team tagged `vendor=acme`; on the VM it's `x_vendor`" → expected, because it collided with the default `Vendor` tag.
+> - "How do you attribute serverless spend by team?" → **serverless usage policies** + `system.billing.usage`. There are no VMs to tag.
+> - "Finance's numbers don't match the account console" → console is list price; Cost Management is after discounts and reservations.
+
+### C. Estate topology and landing zones
+
+**A typical Azure estate** (lesson example):
+
+```mermaid
+flowchart TB
+    subgraph acct["Databricks account (one per Entra tenant)"]
+        ms["Metastore<br/>australiaeast"]
+        ncc["NCC<br/>australiaeast"]
+    end
+    subgraph wl["Workload landing zone"]
+        subgraph dev["Subscription: lakeside-dev"]
+            wdev["Workspace lakeside-dev<br/>classic, managed VNet"]
+            wsb["Workspace lakeside-sandbox<br/>serverless"]
+        end
+        subgraph prod["Subscription: lakeside-prod"]
+            wprod["Workspace lakeside-prod<br/>VNet injection, Private Link, CMK"]
+        end
+    end
+    subgraph plat["Platform landing zone"]
+        subgraph hub["Subscription: connectivity hub"]
+            net["Azure Firewall, ExpressRoute,<br/>private DNS zones"]
+        end
+    end
+    ms -- "metastore assignment" --> wdev
+    ms --> wsb
+    ms -- "metastore assignment" --> wprod
+    ncc -- "NCC assignment" --> wprod
+    wprod -- "peering and egress" --- net
+```
+
+| Cloud Adoption Framework | Well-Architected service guide | Workspace strategy |
+|---|---|---|
+| The CAF cloud-scale analytics scenario (which included Azure Databricks pages) **now redirects to the Fabric-centred *Data for AI and Analytics* guidance**, which treats Azure Databricks as an integrated Azure service with its own pricing. **The landing-zone pattern still stands**: workspaces in a **workload landing zone**, the connectivity hub and identity in the **platform landing zone**. | *Architecture best practices for Azure Databricks* covers **reliability** (multi-region and DR), **security** (UC, CMK, SCC, Private Link, audit logs, one workspace per environment), **cost**, **operational excellence** (serverless workspaces, ARM and Bicep), and **performance**. ⚠️ Read its tier guidance against the Standard tier retirement (1.2). | **Split by SDLC environment with a subscription each**, share the regional metastore, **bind production catalogs to production workspaces**, and **isolate teams at catalog level rather than by workspace sprawl**. |
+
+### D. Disaster recovery ⚠️
+
+```mermaid
+flowchart TD
+    q2{"Cross-region DR:<br/>need active-active<br/>or cross-cloud?"}
+    q3{"Eligible for Managed DR?<br/>Premium in both regions,<br/>Mission Critical on both,<br/>approved by account team"}
+    mdr["Managed DR<br/>failover group + stable URL<br/>secondary catalogs read-only"]
+    aa["Custom active-active or<br/>cross-cloud design<br/>both regions serve traffic"]
+    diy["DIY active-passive<br/>Deep Clone + IaC + Git<br/>you own RPO/RTO testing"]
+    gap["Plus DIY for what Managed DR<br/>doesn't replicate: volumes data,<br/>secrets, models, serving endpoints,<br/>vector indexes, shares, dashboards"]
+    q2 -- yes --> aa
+    q2 -- no --> q3
+    q3 -- yes --> mdr
+    q3 -- no --> diy
+    mdr --> gap
+```
+
+| DIY active-passive | Managed Disaster Recovery | Managed DR limits to know |
+|---|---|---|
+| A second workspace in another region, normally in the same account and tenant. **Databricks now points you to Managed DR first**, and keeps the DIY path for what Managed DR doesn't replicate, for active-active, and for cross-cloud. | **Gated**: apply through your account team. Needs **Premium in both regions** and the **Mission Critical add-on on both workspaces**. | **Not replicated:** managed volume data, secrets, models, serving endpoints, vector search indexes, Delta shares, and published dashboards. **Materialized views, streaming tables, and Lakeflow pipelines replicate only in Private Preview.** |
+| Replicate tables with **Deep Clone**. ⚠️ **Geo-redundant storage is not a substitute for the workspace storage account.** Configuration with IaC, code with Git. | Needs serverless compute, account-level SSO with AIM or SCIM, a **secondary metastore**, and an **NCC and access connector in the secondary region**. | **Secondary catalogs are read-only.** The initial bootstrap can take **up to five days** for large workspaces. |
+| **You own** the runbooks, the RPO and RTO testing, and the drift. | **Failover groups and stable URLs** in the account console under **Resilience**. **21 Azure regions**, with some pairs ruled out (**Australia East can't pair with Australia Southeast**). | **One failover group per workspace, ten catalogs per group.** |
+
+> Exam angles:
+> - "Is GRS on the workspace storage account enough for DR?" → **no**. Use Deep Clone or Managed DR.
+> - "Managed DR prerequisites" → Premium in both regions, Mission Critical add-on on both workspaces, serverless, account-level SSO with AIM/SCIM, secondary metastore, NCC + access connector in the secondary region, and approval through the account team.
+> - "Need secrets and serving endpoints in the DR region" → Managed DR doesn't replicate them. Handle with IaC (DIY).
+
+### Key takeaways
+
+- Azure Cost Management holds the invoice (DBU meters plus VM, disk, storage, network). `system.billing.usage` holds DBUs with tags and metadata. Join them by tag.
+- Tags propagate to Azure VMs. Conflicting custom keys get an `x_` prefix, and Azure caps resources at 50 tags.
+- Pool-launched clusters carry pool and workspace tags only. Serverless usage is tagged through usage policies.
+- One subscription per environment, one metastore per region, catalog-level isolation, hub connectivity in a platform landing zone.
+- Databricks recommends Managed DR for cross-region recovery. It's gated, needs Mission Critical on both workspaces, and has scope limits, so DIY active-passive stays for the rest.
+
+### Course vs docs
+
+- **CAF change:** the course notes that the CAF cloud-scale analytics guidance for Azure Databricks now redirects to the Fabric-centred *Data for AI and Analytics* guidance. Older study material that points to the cloud-scale analytics scenario is out of date, but the landing-zone pattern hasn't changed.
+- **Well-Architected tier guidance** may still mention Standard tier. The course says to read it against the Standard retirement in 1.2.
+- **Things likely to change:** serverless usage policies (Public Preview), Managed DR replication of MVs/streaming tables/pipelines (Private Preview), and the Managed DR region list (21 regions).
+- Fits with 1.4: account console Usage and Budgets are list price only, and the real invoice is in Azure Cost Management.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Billing system tables](https://learn.microsoft.com/en-us/azure/databricks/admin/system-tables/billing)
+- [Usage detail tags](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage-detail-tags)
+- [Usage (account settings)](https://learn.microsoft.com/en-us/azure/databricks/admin/account-settings/usage)
+- [Managed disaster recovery](https://learn.microsoft.com/en-us/azure/databricks/admin/managed-disaster-recovery)
+- [Best practices](https://learn.microsoft.com/en-us/azure/databricks/getting-started/best-practices)
+- [Well-Architected service guide: Azure Databricks](https://learn.microsoft.com/en-us/azure/well-architected/service-guides/azure-databricks)
+- [CAF cloud-scale analytics: data ingestion](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/scenarios/cloud-scale-analytics/best-practices/data-ingestion)
+- [CAF landing zones](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/ready/landing-zone/)
+
+### ⚡ Quick review
+
+- [ ] What does Azure Cost Management show that `system.billing.usage` doesn't, and vice versa?
+- [ ] How fast do records arrive in `system.billing.usage`? Which table converts to list-price dollars?
+- [ ] What's the default tag set for jobs compute, SQL warehouses, and pools?
+- [ ] What happens when a custom tag key collides with a default tag? With a compute policy tag? With a pool tag?
+- [ ] What's the Azure tag cap per resource, and which tags are dropped first?
+- [ ] Which tags does a pool-launched cluster carry?
+- [ ] How long do workspace tag changes take? How do you tag serverless spend?
+- [ ] What's the recommended workspace and subscription strategy?
+- [ ] Managed DR: prerequisites, what isn't replicated, and limits per workspace and group
+- [ ] Why isn't GRS a DR plan for the workspace storage account?
+
+---
+
+<!-- Next: 1.7 Demo: Azure Databricks Workspace Administration Fundamentals -->
