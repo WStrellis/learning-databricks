@@ -103,3 +103,27 @@ Score: **6/6** (first quiz with placeholder-only format instructions, so this sc
 ### Weak spots
 
 - None this round.
+
+## Section 1 mixed quiz, 1.1–1.6 (2026-11-24)
+
+Score: **8/10**. First reliable baseline for Section 1 (new questions, placeholder-only format).
+
+| # | Lesson | Topic | Answer | Correct | Result |
+|---|---|---|---|---|---|
+| 1 | 1.1 | What an Owner can still do with the managed RG (TWO) | AB | AC | ✗ |
+| 2 | 1.1 | Account ID location (weak-spot re-test) | C | C | ✓ |
+| 3 | 1.2 | Access control after Standard → Premium upgrade | A | A | ✓ |
+| 4 | 1.3 | Order: register providers → VNet/subnets → deploy workspace → assign metastore | BCDA | CDAB | ✗ |
+| 5 | 1.3 | Fixed for life: managed RG name, region (TWO) | AD | AD | ✓ |
+| 6 | 1.4 | Later account admins need no Entra role | C | C | ✓ |
+| 7 | 1.4 | 50 workspaces per NCC | D | D | ✓ |
+| 8 | 1.5 | No metastore admin → workspace admins via system group (weak-spot re-test) | C | C | ✓ |
+| 9 | 1.5 | Catalog managed location inside an external location on ADLS Gen2 (HNS) | A | A | ✓ |
+| 10 | 1.6 | Managed DR secondary catalogs are read-only | D | D | ✓ |
+
+### Weak spots
+
+- **Account ID vs workspace ID: confirmed fixed** (2nd correct in a row).
+- **Auto-enabled metastore privileges: fixed** (1.5 Q4 miss, now correct).
+- **Managed RG deny assignment (Q1).** Picked "add an NSG rule" (B). The deny assignment blocks writes to the NSG and other resources even for Owner. What you *can* do: read and list the deny assignment, delete the whole workspace, and choose the name at creation. Re-test.
+- **Deployment order (Q4).** Put "assign the metastore" first. A workspace must exist before it can be assigned to a metastore; prerequisites (providers, then networking) come before the deploy. Re-test with another ordering question.
