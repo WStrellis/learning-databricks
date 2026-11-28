@@ -135,4 +135,145 @@ sequenceDiagram
 
 ---
 
-<!-- Next: 2.2 Automatic Identity Management -->
+## 2.2 Automatic Identity Management
+
+Lecture, 12 min. Theme: *identities that arrive on their own.*
+
+Objectives: operate AIM as the default provisioning path; migrate from SCIM and manage coexistence.
+
+### A. AIM is the default ⚠️
+
+- **Automatic identity management (AIM)** lets Azure Databricks read **users, groups, nested groups, and service principals** straight from your Entra tenant. **No enterprise application, no SCIM token, no Entra admin role.**
+- **GA on September 10, 2025.** **On by default for accounts created after August 1, 2025** (matches [S1 1.4](S1-workspace-administration.md#14-account-administration-on-azure)).
+- Older accounts turn it on in the **account console → Security → Identity provider setup → Identity management**. The change takes **5 to 10 minutes**.
+- Needs: **Premium tier**, a **single Entra tenant**, and **at least one identity-federated workspace**.
+
+**How identities arrive** (lesson diagram):
+
+```mermaid
+flowchart LR
+    entra["Microsoft Entra ID<br/>users, groups, nested groups, service principals"]
+    jit["First login, JIT"]
+    adm["Admin adds an Entra group<br/>in the account or workspace UI"]
+    dash["Dashboard shared with an Entra user<br/>joins the account at next login"]
+    acct["Databricks account<br/>identities created on first use or when an admin adds them"]
+    ws["Workspace<br/>assignment is a separate step"]
+    entra -. "lookup and sync" .-> acct
+    jit --> acct
+    adm --> acct
+    dash --> acct
+    acct --> ws
+```
+
+**AIM vs SCIM:**
+
+| Capability | Automatic identity management | SCIM provisioning |
+|---|---|---|
+| Users | Yes: on first login, when an admin adds them, or when a dashboard is shared with them | Yes, pushed by the Entra app |
+| **Groups** | Yes, **including nested groups** (transitive membership) | **Direct members only, no nesting** |
+| **Service principals** | Yes, **on first use** | **Not supported** by the Entra gallery app |
+| **Entra prerequisites** | **None**: any Entra edition, no admin role | **Cloud Application Administrator**; **Entra Premium** to provision groups |
+| Workspaces | Requires **identity federation** (on for every new workspace) | Account-level or legacy workspace-level connectors |
+| Directory scope | **Home tenant**, including matching B2B guest objects | B2B provisioning depends on the connector; inspect identity matching |
+
+> Exam angles:
+> - "Need nested Entra groups / service principals in Databricks without granting an Entra admin role" → **AIM**.
+> - "Customer on Entra Free, wants groups provisioned" → AIM (SCIM groups need Entra Premium).
+
+### B. Provisioning behavior and sync cadence ⚠️
+
+| Just-in-time | Group membership refresh | Things that surprise people |
+|---|---|---|
+| **JIT is always on when AIM is on, and can't be disabled** | **Browser login**: memberships sync if **more than 5 minutes** have passed since the last sync | Synced groups are **account-level**. **Assigning them to a workspace is a manual step**, and a **child group must be assigned itself** before it can hold workspace-object permissions. |
+| Users are created at first login, when an admin adds them, or when a dashboard is shared with them. They join the **account** at login, **not the workspace**. | **Tokens and jobs**: under 10 min since last sync → no refresh. **10 to 40 min** → asynchronous refresh. **Over 40 min** → refresh **before the request completes**. | **A group rename isn't pushed**: it syncs when an account admin **opens the group's detail page** |
+| **Service principals** are created on **first use** (token auth or job run), **not when their group is added** | **SCIM** syncs on its own cycle, **every 20 to 40 minutes** | **An email change creates a new user** instead of updating the old one |
+| | | **Users deleted in Entra are deactivated on the next sync. Their tokens are not revoked.** |
+
+**Identity attributes (Beta).** AIM can sync a fixed set of **nine Entra user attributes** onto account users: `title`, `userType`, `locality`, `region`, `country`, `costCenter`, `organization`, `division`, `department`.
+- Purpose: **Unity Catalog ABAC** policies can use them, for example to mask a column unless the user's `country` matches the data.
+- An account admin turns on the **Identity Attribute Control List** preview (account console → Previews). The control list is an **account-level allowlist** of which of the nine attributes may be written. Every AIM sync reconciles stored values against it.
+- **Users only**, one value each, **read-only** in the console (User management → user → Identity attributes tab).
+- Entra has **no native source for `costCenter` or `division`**, so those need a **custom extension attribute**.
+- Refresh: the signed-in user within about **5 minutes**, everyone else within **5 days**.
+
+**Evidence in the audit log.** Identities created by AIM carry `request_params.endpoint = 'autoUserCreation'`, and group memberships carry `groupMembershipType = 'IdentityProvider'`, in `system.access.audit`. AIM-managed identities show as **External** in the UI and **can't be edited there**.
+
+> Exam angles:
+> - "Service principal's group was added but the SP isn't in Databricks" → SPs appear on **first use**, not when their group is added.
+> - "Entra group synced, but it can't be granted on a workspace object" → **assign the group to the workspace** (and assign child groups on their own).
+> - "User left, removed from Entra, but their PAT still works" → deactivation doesn't revoke tokens. **Revoke in the Token report** (2.1 D).
+> - "User's email changed and they lost access" → AIM made a **new user**.
+> - "Prove a user came from AIM" → `system.access.audit`, `request_params.endpoint = 'autoUserCreation'`.
+
+### C. SCIM: still supported, no longer the default
+
+SCIM uses the Entra gallery app **Azure Databricks SCIM Provisioning Connector** with a SCIM URL and token from the account console. Databricks recommends AIM, but SCIM still works.
+
+| Where SCIM still wins | Where SCIM loses |
+|---|---|
+| Existing **B2B provisioning flows** that haven't passed AIM readiness checks | The gallery connector **doesn't provision nested groups or service principals**. Check its documented attribute mappings for updates. |
+| Estates that depend on **`externalId` matching** or **locally modified group memberships** | Needs **Cloud Application Administrator** and **Entra Premium** for groups |
+| Organizations that require an **Entra-side provisioning record** for every identity | **20 to 40 minute cycles**. The connector **isn't available in Azure China**. |
+
+### D. Migrating and coexisting ⚠️
+
+**Migration steps, in order:**
+1. Run the **AIM readiness report**: external ID and group membership mismatches, and which workspaces are identity-federated.
+2. Audit automations that reference service principals **by display name**. AIM overwrites display names from Entra, so reference the **application ID** instead.
+3. Optionally configure the **account access denylist** to block specific users, groups, or SPs from being provisioned (contractors, test accounts). Then notify workspace admins.
+4. **Enable AIM** under Security → Identity provider setup → Identity management. Wait 5 to 10 minutes.
+5. **Validate** as an account admin (add a user and a group from Entra) and as a workspace admin (add a user, share an asset with a group).
+6. Confirm in `system.access.audit` using the **`autoUserCreation`** endpoint.
+7. **Disable SCIM only if** all three hold: **no nested groups are relied on**, **`externalId` values already match Entra object IDs**, and **no memberships were modified locally**. Otherwise **keep both running**.
+
+**Coexistence rules:**
+- **SCIM keeps managing the identities it created**, and AIM ignores those.
+- **AIM never removes memberships that SCIM synced.**
+- Use the readiness report to fix identity and membership mismatches **before** changing provisioning paths.
+- **Turning AIM off later**: users and SPs stay, but **the groups AIM manages lose all their members**. So **set up SCIM first** so it can take over membership sync if you ever need to reverse.
+
+> Exam angles:
+> - "First step of a SCIM → AIM migration" → **run the readiness report**.
+> - "Jobs broke after enabling AIM because a script looks up the SP by name" → AIM overwrote display names. Use the **application ID**.
+> - "Can we switch off SCIM now?" → only if no nested groups are relied on, `externalId` matches Entra object IDs, and no local membership edits. Otherwise run both.
+> - "Need to roll back AIM without breaking group permissions" → **stand up SCIM first**, then turn AIM off.
+
+### Key takeaways
+
+- AIM is GA (September 10, 2025) and the default for accounts created after August 1, 2025. Older accounts flip the switch under Security → Identity provider setup.
+- It syncs users, groups, nested groups, and service principals with no Entra app and no admin role. JIT is always on. Identity attributes (Beta) add nine user attributes for UC ABAC.
+- Browser logins refresh memberships after 5 minutes, tokens and jobs within 40 minutes. Groups still need workspace assignment.
+- Keep existing SCIM until the migration conditions are met. The gallery connector doesn't provision nested groups or service principals.
+- Migrate with the readiness report, validate through the audit table, and keep SCIM in parallel unless the three disable conditions hold.
+
+### Course vs docs
+
+- Consistent with 2.1: JIT is on by default for accounts created after May 1, 2025 (2.1), and **always on when AIM is enabled** (here). AIM's own default date is August 1, 2025.
+- Things likely to change: identity attributes and the Identity Attribute Control List are **Beta/preview**, and UC ABAC column masking with them is documented as Beta. The 9-attribute list may grow.
+- No conflicts found with S1 or 2.1.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Automatic identity management](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/automatic-identity-management/)
+- [Migrate to AIM](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/automatic-identity-management/migrate-to-aim)
+- [SCIM provisioning with Entra ID](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/scim/aad)
+- [Identity attributes](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/identity-attributes/)
+- [Account access denylist](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/automatic-identity-management/account-access-denylist)
+
+### ⚡ Quick review
+
+- [ ] When did AIM go GA, and which accounts have it on by default? What does it need?
+- [ ] Name 3 things AIM handles that the SCIM gallery connector doesn't.
+- [ ] When is a service principal created under AIM?
+- [ ] Group membership refresh: browser login vs tokens and jobs (the 5 / 10 / 40 minute rules)
+- [ ] What happens on an Entra group rename? An email change? A user deleted in Entra?
+- [ ] Why can't a synced child group hold workspace-object permissions yet?
+- [ ] Which 9 attributes can identity attributes sync, and which 2 need a custom extension attribute?
+- [ ] How do you prove an identity came from AIM?
+- [ ] First migration step? Why reference SPs by application ID?
+- [ ] The 3 conditions for turning SCIM off
+- [ ] What breaks if you turn AIM off, and how do you prepare?
+
+---
+
+<!-- Next: 2.3 Service Principals, Managed Identities, and API Auth -->
