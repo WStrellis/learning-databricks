@@ -276,4 +276,147 @@ SCIM uses the Entra gallery app **Azure Databricks SCIM Provisioning Connector**
 
 ---
 
-<!-- Next: 2.3 Service Principals, Managed Identities, and API Auth -->
+## 2.3 Service Principals, Managed Identities, and API Auth
+
+Lecture, 12 min. Theme: *the right identity for every caller.*
+
+Objectives: choose between Databricks-managed and Entra ID service principals; authenticate from Azure services with managed identities.
+
+### A. Service principal types ⚠️
+
+| | **Databricks-managed** (default choice) | **Microsoft Entra ID-managed** (Azure-native) |
+|---|---|---|
+| What it is | Created in the **account console or workspace settings**. Exists **only in Databricks**. | An **Entra application or a managed identity**, registered in Databricks by its **application (client) ID** |
+| How it authenticates | **Databricks OAuth M2M**: up to **5 OAuth secrets**, each valid **up to 2 years**. Access tokens valid **1 hour**. | An **Entra token for the AzureDatabricks resource**, **or** a **Databricks OAuth secret created in Databricks** (not the Entra client secret) |
+| Use it for | Anything that talks **only to Databricks**: CI/CD, jobs, BI service accounts | Only when the same principal must **also reach other Azure resources**, or when the caller is an **Azure service with a managed identity** |
+
+**The one-hour trap.** Entra access tokens expire after **60 to 90 minutes**, and Databricks recommends **against minting them by hand**. An **Entra-managed SP used from Power BI in M2M mode can't refresh its token**, so any refresh longer than an hour fails. A **Databricks-managed SP refreshes automatically**.
+
+> Exam angles:
+> - "CI/CD pipeline that only calls Databricks APIs" → **Databricks-managed SP** with OAuth M2M.
+> - "Same identity must read Key Vault / ADLS and call Databricks" → **Entra-managed SP** (or a managed identity).
+> - "Power BI refresh fails after about an hour with an Entra SP" → switch to a **Databricks-managed SP**.
+
+### B. Managed identities: no secrets at all ⚠️
+
+**An Azure service authenticating with its managed identity** (lesson diagram):
+
+```mermaid
+sequenceDiagram
+    participant ADF as Data Factory<br/>user-assigned managed identity
+    participant E as Entra ID token service
+    participant W as Workspace
+    ADF->>E: 1. Request token for resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d
+    E-->>ADF: 2. Entra access token, aud = AzureDatabricks
+    ADF->>W: 3. POST /api/2.2/jobs/run-now with Bearer token
+    Note over W: 4. Identity is an Entra-managed service principal in the workspace
+    W-->>ADF: 5. run_id
+```
+
+**Details:**
+- **Register the identity:** add the managed identity to the account or workspace as an **Entra ID-managed service principal**, using its **client ID**. Databricks recommends **user-assigned** managed identities.
+- **Databricks CLI and Terraform:** set **`ARM_USE_MSI=true`** and **`ARM_CLIENT_ID`** with **`DATABRICKS_HOST`**, and assign the identity to the workspace (recommended). The alternative, **`DATABRICKS_AZURE_RESOURCE_ID`**, needs **Contributor or Owner on the workspace resource**.
+- **Tool support (per the lesson):** the **Go SDK, the CLI, and Terraform** support managed identity auth. The **Python and Java SDKs, Databricks Connect, and the VS Code extension haven't implemented it**. Databricks Connect uses Databricks OAuth instead: **U2M** for a developer in an IDE, **M2M** for an SP in automation. Not a PAT, which the docs mark legacy.
+- **Getting a token by hand:** `az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv`, or the MSAL scope `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default`.
+- **First contact through Azure RBAC:** a principal with **Contributor or Owner on the workspace resource** that **isn't yet in the workspace** can call the API with two extra headers:
+  - **`X-Databricks-Azure-SP-Management-Token`**: a token for `https://management.core.windows.net/`
+  - **`X-Databricks-Azure-Workspace-Resource-Id`**
+  
+  After that first call it **is a workspace admin**. **Without the headers, Azure RBAC alone is refused**: a plain bearer token from a principal with Contributor but not in the workspace is rejected until the principal is added. After that, `ARM_TENANT_ID`, `ARM_CLIENT_ID`, and `ARM_CLIENT_SECRET` with `DATABRICKS_HOST` authenticate it.
+
+> Exam angles:
+> - "ADF calls a Databricks job with no secret to rotate" → **managed identity**, registered as an Entra-managed SP by client ID. Token resource = the AzureDatabricks app ID.
+> - "SP has Contributor on the workspace but gets 403 with a bearer token" → not in the workspace yet. **Add it**, or send the **two management-token headers** on the first call.
+> - "Which env vars for MSI auth with the CLI/Terraform?" → `ARM_USE_MSI=true` + `ARM_CLIENT_ID` (+ `DATABRICKS_HOST`).
+
+### C. Databricks OAuth, token federation, and unified auth ⚠️
+
+| OAuth U2M (user to machine) | OAuth M2M (machine to machine) | Token federation (**GA August 26, 2025**) |
+|---|---|---|
+| `databricks auth login --host {workspace-url}` opens the browser, Entra signs you in, and the CLI caches a **one-hour** token (OS-native secure storage since CLI 1.0.0, with a plaintext fallback) | **Client credentials** against `/oidc/v1/token` with `scope=all-apis`. Tokens last **3600 seconds**. | Exchange a **GitHub Actions, Azure DevOps, Kubernetes, or GitLab OIDC token** for a Databricks token. **No stored secret.** |
+| Account level: `--host https://accounts.azuredatabricks.net --account-id {account-id}` | **Account-level tokens can call account and workspace APIs.** Scoped OAuth secrets limit what a secret can mint. | **Account-wide** policies (Security → Identity provider setup → Federation policies) or **per SP** (its Credentials & secrets tab). **20 policies each, fixed.** |
+| Endpoints `/oidc/v1/authorize` and `/oidc/v1/token` | The client ID is the **SP's application ID** | Azure DevOps: issuer `https://vstoken.dev.azure.com/{org-id}`, audience `api://AzureADTokenExchange` |
+
+**Unified auth: which auth type the CLI and SDKs pick:**
+
+| Auth type | When it's picked | Key variables |
+|---|---|---|
+| `pat` | Personal access token present (legacy) | `DATABRICKS_HOST`, `DATABRICKS_TOKEN` |
+| `oauth-m2m` | Databricks-managed SP | `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET` |
+| `databricks-cli` | User logged in with `databricks auth login` | profile in `.databrickscfg` |
+| `azure-msi` | Managed identity on the host | `ARM_USE_MSI=true`, `ARM_CLIENT_ID` |
+| `azure-client-secret` | Entra application with a secret | `ARM_TENANT_ID`, `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET` |
+| `azure-cli` | User or service connection logged in with `az login` | `DATABRICKS_HOST` (and `DATABRICKS_AUTH_TYPE=azure-cli` to force it) |
+| `github-oidc`, `azure-devops-oidc` (also `env-oidc`, `file-oidc`, `oidc-token`) | CI pipelines with token federation | `DATABRICKS_CLIENT_ID` plus the pipeline's identity token |
+
+> Exam angles:
+> - "GitHub Actions deploys bundles, security bans stored secrets" → **token federation** (federation policy on the SP, `github-oidc`).
+> - "Developer in an IDE" → **U2M** (`databricks auth login`). "Unattended job" → **M2M**.
+> - "One token for account and workspace APIs" → **account-level M2M** token.
+> - "Max federation policies" → **20** per account and 20 per SP, not adjustable.
+
+### D. Personal access tokens, discouraged ⚠️
+
+**Legacy, workspace-scoped, and worth policing.** PATs are documented as **legacy**, and Databricks recommends OAuth instead.
+- Work only against **a single workspace**, **never account APIs**.
+- **Default maximum lifetime: 730 days.**
+- Tokens **unused for 90 days are revoked automatically**.
+- A user can hold **up to 600 per workspace**.
+
+| Workspace controls | Account controls |
+|---|---|
+| **Toggle PAT authentication off** on the settings page, **Advanced** tab (Partner Connect integrations still need it on). **No tokens are deleted**, and re-enabling **restores the unexpired ones**. | **Security → Token report**: filter, export, and **revoke tokens account-wide** |
+| **Cap lifetime:** `databricks workspace-conf set-status --json '{"maxTokenLifetimeDays": "90"}'` (applies to **new tokens only**. `"0"` reverts to 730.) | **There's no account-level switch that disables PATs in every workspace on Azure.** Police it per workspace. |
+| Grant **CAN USE** only to the principals that need tokens. **Since February 23, 2026, revoking CAN USE suspends the user's tokens** without deleting them. | **Scoped PATs** (**Beta since February 18, 2026**) restrict a token to API scopes such as `sql` or `unity-catalog`. **Auto-scoping** (a preview) narrows long-lived tokens to the APIs they used after 30 days. |
+
+> Exam angles:
+> - "Disable PATs across all 40 workspaces with one switch" → **not possible on Azure**. Do it per workspace (IaC), and use the Token report to find and revoke.
+> - "Set a 90-day max on PATs" → `maxTokenLifetimeDays`. **Existing tokens keep their lifetime.**
+> - "PAT auth was turned off then back on. What happened to existing tokens?" → the unexpired ones work again.
+> - "Call an account API with a PAT" → can't. Use OAuth.
+
+### Key takeaways
+
+- Databricks-managed SPs with OAuth M2M for Databricks-only callers. Entra-managed SPs when the principal also reaches Azure resources.
+- Managed identities register as Entra-managed SPs by client ID. Tokens target resource `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`.
+- Unified auth picks `pat`, `oauth-m2m`, `databricks-cli`, `azure-msi`, `azure-client-secret`, or `azure-cli` from what you set. CI uses token federation with no stored secret.
+- Entra tokens last about an hour and shouldn't be minted by hand. Azure RBAC alone doesn't get a principal into a workspace unless it sends the management-token headers or is added to the workspace.
+- PATs: workspace-only, 730-day default maximum, auto-revoked after 90 idle days, controlled per workspace and reported at the account.
+
+### Course vs docs
+
+- **Recheck the managed identity tool-support list** before relying on it. The lesson says the Python and Java SDKs haven't implemented managed identity auth. SDK support changes often, so check the [Azure managed identities auth](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/azure-mi) page for the current list.
+- Fits with 2.1: a **Databricks OAuth secret** (even on an Entra-managed SP) never passes through Entra, so Conditional Access doesn't see it.
+- Fits with 2.1's correction on token audiences: Entra tokens use the AzureDatabricks app ID, while federation policies have their own issuer and audience settings.
+- Things likely to change: scoped PATs (Beta), PAT auto-scoping (preview), and the February 2026 CAN USE suspension behavior.
+
+### Official references (from the lesson, checked 2026-10-27)
+
+- [Manage service principals](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/manage-service-principals)
+- [Azure managed identities auth](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/azure-mi)
+- [Microsoft Entra service principal auth](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/azure-sp)
+- [OAuth U2M](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/oauth-u2m)
+- [OAuth M2M](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/oauth-m2m)
+- [OAuth token federation](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/oauth-federation)
+- [Unified auth](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/unified-auth)
+- [Personal access tokens](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/pat)
+- [Databricks Connect cluster config](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/databricks-connect/cluster-config)
+
+### ⚡ Quick review
+
+- [ ] Databricks-managed vs Entra-managed SP: where each lives, how each authenticates, when to pick each
+- [ ] OAuth secrets per SP, their max lifetime, and the access token lifetime
+- [ ] Why does an Entra SP fail Power BI refreshes after about an hour?
+- [ ] How do you register a managed identity? User- or system-assigned?
+- [ ] Env vars for managed identity auth with the CLI/Terraform. What does `DATABRICKS_AZURE_RESOURCE_ID` need?
+- [ ] Contributor on the workspace, not in the workspace: what happens with a plain bearer token? With the two headers?
+- [ ] U2M vs M2M vs token federation: when to use each
+- [ ] Federation policy limits, and where you create them
+- [ ] Which unified-auth type does `ARM_USE_MSI=true` select? `DATABRICKS_CLIENT_ID` + `DATABRICKS_CLIENT_SECRET`?
+- [ ] PAT defaults: scope, max lifetime, idle revocation, per-user limit
+- [ ] What happens to tokens when PAT auth is toggled off and back on? When the max lifetime changes?
+- [ ] Can you disable PATs account-wide on Azure?
+
+---
+
+<!-- Next: 2.4 Storage and Key Vault Integration -->
