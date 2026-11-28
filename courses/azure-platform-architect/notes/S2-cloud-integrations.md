@@ -40,7 +40,7 @@ sequenceDiagram
 | Item | Fact |
 |---|---|
 | **The application** | Enterprise app **`AzureDatabricks`** in every tenant, fixed app ID **`2ff814a6-3304-4ab8-85cb-cd0e6f879c1d`** |
-| What that app ID is used for | **Audience of every token**, **target of Conditional Access policies**, and the principal you grant **Key Vault Crypto Service Encryption User** (or an access policy with get, wrapKey, unwrapKey) for **customer-managed keys** |
+| What that app ID is used for | **Audience of Entra ID access tokens** issued for Azure Databricks, **target of Conditional Access policies**, and the principal you grant **Key Vault Crypto Service Encryption User** (or an access policy with get, wrapKey, unwrapKey) for **customer-managed keys** |
 | **Tenant binding** | Account tied to the tenant ID. Moving a workspace to another tenant is **unsupported**: it stays in the original account. Several tenants → the account console opens your **default** tenant's account; reach another tenant's account from a workspace in that tenant. |
 | **Users** | A workspace admin can add **any user in the workspace's Entra tenant, B2B guests included**. Automatic identity management uses the **guest's email as the username**. **Identity federation is on for every new workspace and can't be turned off.** |
 | **Token claims checked** | **`aud`** = the app ID, **`iss`** = `https://sts.windows.net/{tenant-id}/`, **`tid`** = the workspace's tenant |
@@ -48,7 +48,7 @@ sequenceDiagram
 > Exam angles:
 > - "Configure SSO for Azure Databricks" → nothing to configure. Entra ID over OIDC is native.
 > - "Which object do you target with Conditional Access / grant Key Vault access for CMK?" → the **AzureDatabricks** enterprise app, ID `2ff814a6-...`.
-> - "Token rejected" → check `aud`, `iss`, `tid` against the app ID and the workspace's tenant.
+> - "Entra ID token rejected" → check `aud`, `iss`, `tid` against the app ID and the workspace's tenant. (Databricks OAuth tokens and federated tokens use other audiences; see Course vs docs.)
 
 ### B. Conditional Access and MFA inherit from the tenant ⚠️
 
@@ -60,7 +60,7 @@ sequenceDiagram
 
 > Exam angles:
 > - "User blocked at login, nothing in `system.access.audit`. Where do you look?" → **Entra sign-in logs**.
-> - "Apply MFA to a service principal" → CA for **workload identities** (Workload ID Premium), not a regular user CA policy. And a **Databricks OAuth secret** (M2M) bypasses Entra entirely, so CA never sees it.
+> - "Require MFA for a service principal" → **not possible**: service principals can't do MFA. CA for **workload identities** (Workload ID Premium) can only **block** access, based on location or risk. And a **Databricks OAuth secret** (M2M) bypasses Entra entirely, so CA never sees it.
 > - "Git folder clone suddenly fails with access denied" → CA on Azure DevOps interacting with Databricks. Exclude Databricks IPs or the users.
 > - "Licensing for risk-based CA" → P2 (ID Protection). Basic CA → P1.
 
@@ -85,7 +85,7 @@ sequenceDiagram
 **Don't carry AWS vocabulary over.** *Unified login* and *emergency access* are documented for AWS and Google Cloud accounts only. The Azure docs cover neither, even though the generic description of the Identity provider setup tab lists a Unified login section. The Azure version of "emergency access" is a **break-glass Entra account excluded from Conditional Access** that holds **Contributor or Owner on the workspace resource**: that user gets **workspace admin** when they click **Launch Workspace** in the Azure portal (same rule as [S1 1.4](S1-workspace-administration.md#14-account-administration-on-azure)).
 
 > Exam angles:
-> - "Shorten idle sessions to 1 hour" → **Entra CA sign-in frequency**, not a Databricks setting.
+> - "Make users sign in again every 4 hours" → **Entra CA sign-in frequency**, not a Databricks setting. Note: sign-in frequency is a **periodic reauthentication interval**, not an inactivity timeout. It's enforced when the app next goes to Entra for a token, so it doesn't guarantee an idle session ends at the mark.
 > - "Revoke every PAT a departed user created, across workspaces" → **account console Token report**.
 > - "Stop AIM from bringing in certain users" → the AIM **account access denylist** (max 100 rules).
 > - "Emergency access if CA locks everyone out" → break-glass Entra account excluded from CA, with Contributor/Owner on the workspace.
@@ -96,12 +96,14 @@ sequenceDiagram
 - Conditional Access and MFA are **tenant policies** (Entra ID P1) targeting that app. Blocked sign-ins show only in **Entra** logs.
 - AIM supports matching B2B guest objects in the **home tenant**. It can't read another tenant's directory.
 - Workspaces can't move between tenants.
-- Databricks-side controls: AIM and JIT, federation policies, token report, IP access lists, context-based ingress. **Session timeouts belong to Entra.**
+- Databricks-side controls: AIM and JIT, federation policies, token report, IP access lists, context-based ingress. **Periodic reauthentication (sign-in frequency) belongs to Entra.**
 
 ### Course vs docs
 
 - **Two dates, two features. Don't mix them up.** This lesson: **JIT provisioning** is on by default for accounts created after **May 1, 2025**. [S1 1.4](S1-workspace-administration.md#14-account-administration-on-azure): **AIM** is on for accounts created after **August 1, 2025**. Not a conflict, but an easy swap on a quiz.
-- "No Databricks-side session timeout is documented" is the course's wording for Azure. Treat it as "use Entra sign-in frequency" and recheck before relying on it, since workspace settings change often.
+- "No Databricks-side session timeout is documented" is the course's wording for Azure. The Entra answer is sign-in frequency, which forces **periodic reauthentication**. It isn't an idle timeout ([session lifetime docs](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-session-lifetime)). Recheck the Databricks side before relying on it, since workspace settings change often.
+- **Token audience.** The lesson says the app ID is the audience of *every* token. That's true for **Entra ID access tokens**, but [OAuth federation policies](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/oauth-federation-policy) accept the audiences you configure (default: the Databricks account ID), and Databricks-issued OAuth tokens don't come from Entra at all.
+- **Service principals and MFA.** Service principals can't do MFA. [CA for workload identities](https://learn.microsoft.com/en-us/entra/identity/conditional-access/workload-identity) supports only the **Block** grant control.
 - Things likely to change: context-based ingress for the account console (Beta), and the AIM denylist limit (100 rules).
 - No conflicts found with S1 or DP-750 notes.
 
@@ -127,7 +129,7 @@ sequenceDiagram
 - [ ] Why might Git folder clones break, and how do you fix it?
 - [ ] How do you bring in a partner from another tenant? Can AIM read their home tenant?
 - [ ] Can a B2B guest publish to Power BI in your tenant?
-- [ ] Where do you set a session timeout?
+- [ ] Where do you force periodic reauthentication? Is that the same as an idle timeout?
 - [ ] JIT default date vs AIM default date
 - [ ] What's the Azure equivalent of AWS "emergency access"?
 
