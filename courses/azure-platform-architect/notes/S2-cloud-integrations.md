@@ -32,7 +32,7 @@ sequenceDiagram
     CA-->>E: 4. Require MFA / compliant device / allow
     E-->>U: 5. Sign-in and MFA challenge
     U->>W: 6. ID token (tid, oid, upn)
-    W-->>U: 7. Session; JIT provisioning if first login
+    W-->>U: 7. Session, plus JIT provisioning on first login
 ```
 
 **The details that matter:**
